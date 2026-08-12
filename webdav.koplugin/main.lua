@@ -58,9 +58,81 @@ function WebDAV:init()
     self:onDispatcherRegisterActions()
 end
 
--- 启动 webdav 进程(占位,Task 7 完善)
+-- 启动 webdav 进程
+-- 1. mkdir settings 目录
+-- 2. 写 YAML 配置
+-- 3. Kindle 防火墙放行(v3 幂等性: iptables -C 检查规则是否已存在)
+-- 4. 启动后台进程,写 PID 文件
+-- 5. 弹 InfoMessage 反馈
 function WebDAV:start()
-    logger.dbg("[Network] WebDAV:start placeholder")
+    if self:isRunning() then
+        logger.dbg("[Network] Not starting WebDAV server, already running.")
+        return
+    end
+
+    -- 1. mkdir settings 目录(仿 SSH main.lua:99-101)
+    local settings_dir = path .. "/settings/webdav"
+    if not util.pathExists(settings_dir) then
+        os.execute("mkdir -p " .. settings_dir)
+    end
+
+    -- 2. 生成 YAML 配置
+    self.config_path = settings_dir .. "/config.yml"
+    local yaml = webdav_config.writeConfigYAML(
+        self.webdav_port,
+        self.webdav_directory,
+        self.webdav_readonly,
+        self.webdav_username,
+        self.webdav_password)
+    local f = io.open(self.config_path, "w")
+    if f then
+        f:write(yaml)
+        f:close()
+    else
+        logger.warn("[Network] WebDAV: cannot open config file for writing:", self.config_path)
+    end
+
+    -- 3. Kindle 防火墙放行(v3 幂等性保护)
+    if Device:isKindle() then
+        -- 3a. INPUT 规则: 先 check 已存在就跳过 -A
+        local input_check = string.format(
+            "iptables -C INPUT -p tcp --dport %s -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null",
+            self.webdav_port)
+        if os.execute(input_check) ~= 0 then
+            os.execute(string.format("%s %s %s",
+                "iptables -A INPUT -p tcp --dport", self.webdav_port,
+                "-m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"))
+        end
+        -- 3b. OUTPUT 规则同理
+        local output_check = string.format(
+            "iptables -C OUTPUT -p tcp --sport %s -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null",
+            self.webdav_port)
+        if os.execute(output_check) ~= 0 then
+            os.execute(string.format("%s %s %s",
+                "iptables -A OUTPUT -p tcp --sport", self.webdav_port,
+                "-m conntrack --ctstate ESTABLISHED -j ACCEPT"))
+        end
+    end
+
+    -- 4. 启动并保存 PID(webdav 无 -P 选项,用 shell & echo $!)
+    local cmd = string.format(
+        "./webdav -c %s & echo $! > /tmp/webdav_koreader.pid",
+        self.config_path)
+    logger.dbg("[Network] Launching WebDAV server: ", cmd)
+    if os.execute(cmd) == 0 then
+        UIManager:show(InfoMessage:new{
+            timeout = 10,
+            text = T(_("WebDAV server started.\n\nWebDAV port: %1\n%2"),
+                self.webdav_port,
+                Device.retrieveNetworkInfo and Device:retrieveNetworkInfo()
+                    or _("Could not retrieve network info.")),
+        })
+    else
+        UIManager:show(InfoMessage:new{
+            icon = "notice-warning",
+            text = _("Failed to start WebDAV server."),
+        })
+    end
 end
 
 -- 判断 webdav 进程是否在跑(用 PID 文件存在性,仿 SSH)
