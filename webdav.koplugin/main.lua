@@ -140,9 +140,80 @@ function WebDAV:isRunning()
     return util.pathExists("/tmp/webdav_koreader.pid")
 end
 
--- 停止 webdav 进程(占位,Task 8 完善)
+-- 内部: 实际停进程逻辑
+---@param force boolean 若优雅停不掉是否强杀(目前 v3.2 不暴露 force 选项,保留以便将来扩展)
+---@return boolean ok, string|nil err
+function WebDAV:stopPlugin(force)
+    if not self:isRunning() then
+        return true
+    end
+
+    local pid_path = "/tmp/webdav_koreader.pid"
+    local pid
+    local function readPID()
+        local f = io.open(pid_path, "r")
+        if not f then return nil end
+        local s = f:read("*l")
+        f:close()
+        return s and tonumber(s) or nil
+    end
+    pid = readPID()
+
+    local function isProcAlive(p)
+        return p and util.pathExists("/proc/" .. p)
+    end
+
+    local function send(sig, p)
+        return os.execute(string.format("kill -%s %d 2>/dev/null", sig, p)) == 0
+    end
+
+    send("TERM", pid)
+    for _ = 1, 20 do
+        if not isProcAlive(pid) then break end
+        ffiutil.sleep(0.1)
+    end
+
+    if isProcAlive(pid) and force then
+        send("KILL", pid)
+        for _ = 1, 10 do
+            if not isProcAlive(pid) then break end
+            ffiutil.sleep(0.1)
+        end
+    end
+
+    -- Kindle 撤销 iptables
+    if Device:isKindle() then
+        os.execute(string.format("%s %s %s",
+            "iptables -D INPUT -p tcp --dport", self.webdav_port,
+            "-m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"))
+        os.execute(string.format("%s %s %s",
+            "iptables -D OUTPUT -p tcp --sport", self.webdav_port,
+            "-m conntrack --ctstate ESTABLISHED -j ACCEPT"))
+    end
+
+    if not isProcAlive(pid) then
+        os.remove(pid_path)
+        return true
+    end
+    return false, "webdav process did not exit"
+end
+
+-- 用户面停进程入口
 function WebDAV:stop()
-    logger.dbg("[Network] WebDAV:stop placeholder")
+    local ok, err = self:stopPlugin(false)
+    if not ok then
+        logger.warn("WebDAV: graceful stop failed:", err)
+        UIManager:show(InfoMessage:new{
+            icon = "notice-warning",
+            text = _("WebDAV server is still shutting down… Active connections may remain until they are closed."),
+            timeout = 3,
+        })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = _("WebDAV server stopped."),
+        timeout = 2,
+    })
 end
 
 -- 主菜单 toggle 行为
