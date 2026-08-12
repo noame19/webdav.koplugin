@@ -245,9 +245,231 @@ function WebDAV:addToMainMenu(menu_items)
             touchmenu_instance:updateItems()
         end,
         sub_item_table = {
-            -- 子菜单 7 项在 Task 10 填充
+            -- 子项 1: 启用 toggle(与父项同名 "WebDAV server")
+            {
+                text = _("WebDAV server"),
+                checked_func = function() return self:isRunning() end,
+                check_callback_updates_menu = true,
+                callback = function(touchmenu_instance)
+                    self:onToggleWebDAVServer()
+                    ffiutil.sleep(1)
+                    touchmenu_instance:updateItems()
+                end,
+            },
+            -- 子项 2: 端口显示+改
+            {
+                text_func = function()
+                    return T(_("WebDAV port: %1"), self.webdav_port)
+                end,
+                keep_menu_open = true,
+                enabled_func = function() return not self:isRunning() end,
+                callback = function(touchmenu_instance)
+                    self:show_port_dialog(touchmenu_instance)
+                end,
+            },
+            -- 子项 3: 数据目录显示+改
+            {
+                text_func = function()
+                    return T(_("Data directory: %1"), self.webdav_directory)
+                end,
+                keep_menu_open = true,
+                enabled_func = function() return not self:isRunning() end,
+                callback = function(touchmenu_instance)
+                    self:show_directory_dialog(touchmenu_instance)
+                end,
+            },
+            -- 子项 4: 文件模式 toggle(勾上=读写)
+            {
+                text_func = function()
+                    return T(_("File mode: %1"),
+                        self.webdav_readonly and _("Read only") or _("Read/Write"))
+                end,
+                checked_func = function() return not self.webdav_readonly end,
+                enabled_func = function() return not self:isRunning() end,
+                keep_menu_open = true,
+                callback = function()
+                    self.webdav_readonly = not self.webdav_readonly
+                    G_reader_settings:flipNilOrFalse("webdav_readonly")
+                end,
+            },
+            -- 子项 5: 用户名显示+改
+            {
+                text_func = function()
+                    return T(_("Username: %1"), self.webdav_username)
+                end,
+                keep_menu_open = true,
+                enabled_func = function() return not self:isRunning() end,
+                callback = function(touchmenu_instance)
+                    self:show_username_dialog(touchmenu_instance)
+                end,
+            },
+            -- 子项 6: 密码显示+改(明文存,help_text 风险提示)
+            {
+                text_func = function()
+                    return T(_("Password: %1"), self.webdav_password)
+                end,
+                help_text = _("Stored in plaintext in KOReader settings. Visible to anyone with shell access to the device."),
+                keep_menu_open = true,
+                enabled_func = function() return not self:isRunning() end,
+                callback = function(touchmenu_instance)
+                    self:show_password_dialog(touchmenu_instance)
+                end,
+            },
+            -- 子项 7: 开机自启 toggle
+            {
+                text = _("Start with KOReader"),
+                checked_func = function() return self.autostart end,
+                callback = function()
+                    self.autostart = not self.autostart
+                    G_reader_settings:flipNilOrFalse("webdav_autostart")
+                end,
+            },
         },
     }
+end
+
+-- 端口 InputDialog
+function WebDAV:show_port_dialog(touchmenu_instance)
+    self.port_dialog = InputDialog:new{
+        title = _("WebDAV port"),
+        input = self.webdav_port,
+        input_type = "number",
+        input_hint = self.webdav_port,
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.port_dialog)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = tonumber(self.port_dialog:getInputText())
+                        if value and value >= 0 then
+                            self.webdav_port = tostring(value)
+                            G_reader_settings:saveSetting("webdav_port", self.webdav_port)
+                            UIManager:close(self.port_dialog)
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.port_dialog)
+    self.port_dialog:onShowKeyboard()
+end
+
+-- 数据目录 InputDialog
+function WebDAV:show_directory_dialog(touchmenu_instance)
+    self.directory_dialog = InputDialog:new{
+        title = _("Data directory"),
+        input = self.webdav_directory,
+        input_type = "text",
+        input_hint = "/mnt/us",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.directory_dialog)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = self.directory_dialog:getInputText()
+                        if value and value ~= "" then
+                            self.webdav_directory = value
+                            G_reader_settings:saveSetting("webdav_directory", self.webdav_directory)
+                            UIManager:close(self.directory_dialog)
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.directory_dialog)
+    self.directory_dialog:onShowKeyboard()
+end
+
+-- 用户名 InputDialog
+function WebDAV:show_username_dialog(touchmenu_instance)
+    self.username_dialog = InputDialog:new{
+        title = _("Username"),
+        input = self.webdav_username,
+        input_type = "text",
+        input_hint = "admin",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.username_dialog)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = self.username_dialog:getInputText()
+                        if value and value ~= "" then
+                            self.webdav_username = value
+                            G_reader_settings:saveSetting("webdav_username", self.webdav_username)
+                            UIManager:close(self.username_dialog)
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.username_dialog)
+    self.username_dialog:onShowKeyboard()
+end
+
+-- 密码 InputDialog(input_type=password 用密码键盘)
+function WebDAV:show_password_dialog(touchmenu_instance)
+    self.password_dialog = InputDialog:new{
+        title = _("Password"),
+        input = self.webdav_password,
+        input_type = "password",
+        input_hint = "********",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(self.password_dialog)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local value = self.password_dialog:getInputText()
+                        if value and value ~= "" then
+                            self.webdav_password = value
+                            G_reader_settings:saveSetting("webdav_password", self.webdav_password)
+                            UIManager:close(self.password_dialog)
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(self.password_dialog)
+    self.password_dialog:onShowKeyboard()
 end
 
 return WebDAV
