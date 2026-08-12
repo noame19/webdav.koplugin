@@ -46,19 +46,39 @@ Kindle 装 KOReader 之后，插上 USB 线（或者 SSH / Wi-Fi 传），把 `w
 /mnt/us/koreader/plugins/
 └── webdav.koplugin/
     ├── _meta.lua       ← 插件元数据（KOReader 用来识别这是个插件）
-    ├── main.lua        ← 插件主逻辑
-    ├── webdav          ← ARMv7 静态编译的二进制（约 6MB）
+    ├── main.lua        ← 插件主逻辑（YAML 生成已内联，无需额外文件）
+    ├── webdav          ← ARMv7 静态编译的二进制（约 8.7MB）
     ├── LICENSE         ← hacdias/webdav 的 MIT 许可证
     └── README.md       ← 就是你现在读的这个文件
 ```
 
 > 💡 `/mnt/us/` 在 Kindle 里就是 USB 模式下的根目录。所以你也可以直接在电脑资源管理器里看到 `koreader/plugins/` 这个目录。
 
-### 3. 重启 KOReader
+### 3. 重启 KOReader 前的快速校验
+
+SSH 进 Kindle 跑一下（**强烈建议做**，可以排除 80% 的"看不到菜单"问题）：
+
+```bash
+ssh root@<Kindle IP> "ls -la /mnt/us/koreader/plugins/webdav.koplugin/"
+```
+
+应该看到 5 个文件：`_meta.lua`、`main.lua`、`webdav`、`LICENSE`、`README.md`。
+
+> ⚠️ 如果 `webdav` 二进制没拷过去，或主菜单看不到 WebDAV server 项：检查 `main.lua` 是否完整上传（KOReader 启动时会因二进制缺失自动 `return { disabled = true }` 静默禁用插件）。
+
+再校验二进制可执行：
+
+```bash
+ssh root@<Kindle IP> "/mnt/us/koreader/plugins/webdav.koplugin/webdav --version"
+```
+
+应该打印类似 `webdav 5.x.x` 的版本号。
+
+### 4. 重启 KOReader
 
 完全退出 KOReader（按 Kindle 的电源键真退出，不要只锁屏），再重新打开。
 
-### 4. 验证
+### 5. 验证
 
 进入 KOReader 主菜单 → **网络** → 应该能看到 **WebDAV server** 这一项。
 
