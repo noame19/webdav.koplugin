@@ -1,14 +1,20 @@
 -- webdav.koplugin/main.lua
 -- KOReader 插件主逻辑:
--- 1. 仿官方 SSH.koplugin 的 toggle/菜单/进程管理模式
--- 2. 集成 hacdias/webdav (Go 单文件二进制,详见 webdav_config.lua)
--- 3. Kindle 设备: 启停时维护 iptables INPUT/OUTPUT 规则(v3 幂等性)
--- 4. 用户配置: 端口/数据目录/文件模式/用户名/密码/自启,持久化到 G_reader_settings
+--   1. 仿官方 SSH.koplugin 的 toggle/菜单/进程管理模式
+--   2. 集成 hacdias/webdav (Go 单文件二进制,YAML 配置内联在本文件)
+--   3. Kindle 设备: 启停时维护 iptables INPUT/OUTPUT 规则(v3 幂等性)
+--   4. 用户配置: 端口/数据目录/文件模式/用户名/密码/自启,持久化到 G_reader_settings
 --
 -- 设计依据:
 --   docs/superpowers/specs/2026-08-11-koreader-webdav-plugin-design.md (v3.2)
 --   计划文档:
 --   docs/superpowers/plans/2026-08-11-koreader-webdav-koplugin.md
+--
+-- 重要: 本插件使用 SSH.koplugin 的"相对路径"模式,所有路径检查都假设 KOReader
+-- 在加载时已经 chdir 到插件目录(/mnt/us/koreader/plugins/webdav.koplugin/)。
+-- 这是 KOReader 加载插件的标准行为,与 SSH 插件一致。
+-- 不再有 webdav_config.lua 依赖: YAML 生成函数直接内联在下面,避免漏拷文件
+-- 导致 require/dofile 失败而插件无法加载。
 
 -- 第三方 KOReader SDK
 local BD = require("ui/bidi")
@@ -25,8 +31,24 @@ local util = require("util")
 local _ = require("gettext")
 local T = ffiutil.template
 
--- 插件内部模块(YAML 配置生成)
-local webdav_config = require("webdav_config")
+-- YAML 配置生成(内联,无外部文件依赖)
+local webdav_config = {}
+function webdav_config.writeConfigYAML(port, directory, readonly, username, password)
+    local permissions = readonly and "R" or "CRUD"
+    return string.format([[
+address: 0.0.0.0
+port: %s
+directory: %s
+permissions: %s
+users:
+  - username: %s
+    password: %s
+log:
+  format: console
+  outputs:
+    - stderr
+]], tostring(port), directory, permissions, username, password)
+end
 
 -- 依赖检查: 二进制必须和 main.lua 在同一目录
 -- (仿 SSH.koplugin main.lua:21-23 模式)
@@ -41,7 +63,7 @@ local WebDAV = WidgetContainer:extend{
     is_doc_only = false,
 }
 
--- 初始化: 读取持久化设置,根据 autostart 决定是否启动,注册菜单与 dispatcher
+-- 初始化: 读取持久化设置,根据 autostart 决定是否启动,注册菜单
 function WebDAV:init()
     self.webdav_port = G_reader_settings:readSetting("webdav_port") or "3568"
     self.webdav_directory = G_reader_settings:readSetting("webdav_directory") or "/mnt/us"
@@ -51,7 +73,12 @@ function WebDAV:init()
     self.autostart = G_reader_settings:isTrue("webdav_autostart")
 
     if self.autostart then
-        self:start()
+        -- pcall 包住: 即使 start() 出错,也要让菜单能注册
+        -- (避免因 iptables / 权限 / 二进制异常等导致用户看不到整个插件)
+        local ok, err = pcall(function() self:start() end)
+        if not ok then
+            logger.warn("[Network] WebDAV autostart failed:", err)
+        end
     end
 
     self.ui.menu:registerToMainMenu(self)
@@ -59,18 +86,13 @@ function WebDAV:init()
 end
 
 -- 启动 webdav 进程
--- 1. mkdir settings 目录
--- 2. 写 YAML 配置
--- 3. Kindle 防火墙放行(v3 幂等性: iptables -C 检查规则是否已存在)
--- 4. 启动后台进程,写 PID 文件
--- 5. 弹 InfoMessage 反馈
 function WebDAV:start()
     if self:isRunning() then
         logger.dbg("[Network] Not starting WebDAV server, already running.")
         return
     end
 
-    -- 1. mkdir settings 目录(仿 SSH main.lua:99-101)
+    -- 1. mkdir settings 目录
     local settings_dir = path .. "/settings/webdav"
     if not util.pathExists(settings_dir) then
         os.execute("mkdir -p " .. settings_dir)
@@ -94,31 +116,28 @@ function WebDAV:start()
 
     -- 3. Kindle 防火墙放行(v3 幂等性保护)
     if Device:isKindle() then
-        -- 3a. INPUT 规则: 先 check 已存在就跳过 -A
         local input_check = string.format(
             "iptables -C INPUT -p tcp --dport %s -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null",
             self.webdav_port)
         if os.execute(input_check) ~= 0 then
-            os.execute(string.format("%s %s %s",
-                "iptables -A INPUT -p tcp --dport", self.webdav_port,
-                "-m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"))
+            os.execute(string.format("iptables -A INPUT -p tcp --dport %s -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT",
+                self.webdav_port))
         end
-        -- 3b. OUTPUT 规则同理
         local output_check = string.format(
             "iptables -C OUTPUT -p tcp --sport %s -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null",
             self.webdav_port)
         if os.execute(output_check) ~= 0 then
-            os.execute(string.format("%s %s %s",
-                "iptables -A OUTPUT -p tcp --sport", self.webdav_port,
-                "-m conntrack --ctstate ESTABLISHED -j ACCEPT"))
+            os.execute(string.format("iptables -A OUTPUT -p tcp --sport %s -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+                self.webdav_port))
         end
     end
 
-    -- 4. 启动并保存 PID(webdav 无 -P 选项,用 shell & echo $!)
+    -- 4. 启动并保存 PID
+    -- 用相对路径(假设 CWD 是插件目录,KOReader 加载插件时的标准行为)
     local cmd = string.format(
         "./webdav -c %s & echo $! > /tmp/webdav_koreader.pid",
         self.config_path)
-    logger.dbg("[Network] Launching WebDAV server: ", cmd)
+    logger.dbg("[Network] Launching WebDAV server:", cmd)
     if os.execute(cmd) == 0 then
         UIManager:show(InfoMessage:new{
             timeout = 10,
@@ -141,7 +160,7 @@ function WebDAV:isRunning()
 end
 
 -- 内部: 实际停进程逻辑
----@param force boolean 若优雅停不掉是否强杀(目前 v3.2 不暴露 force 选项,保留以便将来扩展)
+---@param force boolean 若优雅停不掉是否强杀
 ---@return boolean ok, string|nil err
 function WebDAV:stopPlugin(force)
     if not self:isRunning() then
@@ -183,12 +202,12 @@ function WebDAV:stopPlugin(force)
 
     -- Kindle 撤销 iptables
     if Device:isKindle() then
-        os.execute(string.format("%s %s %s",
-            "iptables -D INPUT -p tcp --dport", self.webdav_port,
-            "-m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT"))
-        os.execute(string.format("%s %s %s",
-            "iptables -D OUTPUT -p tcp --sport", self.webdav_port,
-            "-m conntrack --ctstate ESTABLISHED -j ACCEPT"))
+        os.execute(string.format(
+            "iptables -D INPUT -p tcp --dport %s -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT",
+            self.webdav_port))
+        os.execute(string.format(
+            "iptables -D OUTPUT -p tcp --sport %s -m conntrack --ctstate ESTABLISHED -j ACCEPT",
+            self.webdav_port))
     end
 
     if not isProcAlive(pid) then
@@ -225,15 +244,14 @@ function WebDAV:onToggleWebDAVServer()
     end
 end
 
--- 注册 dispatcher action,允许绑定到 gestures 等插件
+-- 注册 dispatcher action(供 gestures 等插件绑定)
 function WebDAV:onDispatcherRegisterActions()
     Dispatcher:registerAction("toggle_webdav_server",
         { category = "none", event = "ToggleWebDAVServer",
-          title = _("Toggle with KOReader"), general = true })
+          title = _("Toggle WebDAV server"), general = true })
 end
 
--- 主菜单注册: 把 WebDAV server 项加到 KOReader 主菜单的"网络"分组
--- (仿 SSH.koplugin main.lua:160-168, 加 sorting_hint 让它进网络分类)
+-- 主菜单注册
 function WebDAV:addToMainMenu(menu_items)
     menu_items.webdav = {
         text = _("WebDAV server"),
@@ -245,7 +263,7 @@ function WebDAV:addToMainMenu(menu_items)
             touchmenu_instance:updateItems()
         end,
         sub_item_table = {
-            -- 子项 1: 启用 toggle(与父项同名 "WebDAV server")
+            -- 子项 1: 启用 toggle
             {
                 text = _("WebDAV server"),
                 checked_func = function() return self:isRunning() end,
@@ -256,7 +274,7 @@ function WebDAV:addToMainMenu(menu_items)
                     touchmenu_instance:updateItems()
                 end,
             },
-            -- 子项 2: 端口显示+改
+            -- 子项 2: 端口
             {
                 text_func = function()
                     return T(_("WebDAV port: %1"), self.webdav_port)
@@ -267,7 +285,7 @@ function WebDAV:addToMainMenu(menu_items)
                     self:show_port_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 3: 数据目录显示+改
+            -- 子项 3: 数据目录
             {
                 text_func = function()
                     return T(_("Data directory: %1"), self.webdav_directory)
@@ -292,7 +310,7 @@ function WebDAV:addToMainMenu(menu_items)
                     G_reader_settings:flipNilOrFalse("webdav_readonly")
                 end,
             },
-            -- 子项 5: 用户名显示+改
+            -- 子项 5: 用户名
             {
                 text_func = function()
                     return T(_("Username: %1"), self.webdav_username)
@@ -303,7 +321,7 @@ function WebDAV:addToMainMenu(menu_items)
                     self:show_username_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 6: 密码显示+改(明文存,help_text 风险提示)
+            -- 子项 6: 密码
             {
                 text_func = function()
                     return T(_("Password: %1"), self.webdav_password)
@@ -315,7 +333,7 @@ function WebDAV:addToMainMenu(menu_items)
                     self:show_password_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 7: 开机自启 toggle
+            -- 子项 7: 开机自启
             {
                 text = _("Start with KOReader"),
                 checked_func = function() return self.autostart end,
@@ -436,7 +454,7 @@ function WebDAV:show_username_dialog(touchmenu_instance)
     self.username_dialog:onShowKeyboard()
 end
 
--- 密码 InputDialog(input_type=password 用密码键盘)
+-- 密码 InputDialog
 function WebDAV:show_password_dialog(touchmenu_instance)
     self.password_dialog = InputDialog:new{
         title = _("Password"),
