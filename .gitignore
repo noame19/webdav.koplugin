@@ -1,0 +1,23 @@
+# 设计文档与计划（仅本地保留，不提交到仓库）
+docs/
+
+# OS / Editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+*.bak
+.vscode/
+.idea/
+
+# Lua / Build artifacts
+*.luac
+*.luac.bak
+*.tmp
+
+# Local test artifacts (in case pc-side test framework writes them into the repo root)
+tests/.busted
+tests/.luacov*
+
+# Don't ignore the webdav binary (committed intentionally from hacdias/webdav releases)
+!webdav.koplugin/webdav
