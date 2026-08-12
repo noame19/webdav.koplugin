@@ -232,4 +232,22 @@ function WebDAV:onDispatcherRegisterActions()
           title = _("Toggle with KOReader"), general = true })
 end
 
+-- 主菜单注册: 把 WebDAV server 项加到 KOReader 主菜单的"网络"分组
+-- (仿 SSH.koplugin main.lua:160-168, 加 sorting_hint 让它进网络分类)
+function WebDAV:addToMainMenu(menu_items)
+    menu_items.webdav = {
+        text = _("WebDAV server"),
+        sorting_hint = "network",
+        checked_func = function() return self:isRunning() end,
+        hold_callback = function(touchmenu_instance)
+            self:onToggleWebDAVServer()
+            ffiutil.sleep(1)
+            touchmenu_instance:updateItems()
+        end,
+        sub_item_table = {
+            -- 子菜单 7 项在 Task 10 填充
+        },
+    }
+end
+
 return WebDAV
