@@ -39,7 +39,8 @@ describe("writeConfigYAML", function()
         local yaml = writeConfigYAML("3568", "/tmp/fake-mnt-us", false, "admin", "webdav12345")
         assert.is_truthy(yaml:match("port: 3568"),
             "应包含监听端口 3568")
-        assert.is_truthy(yaml:match("directory: /tmp/fake-mnt-us"),
+        -- 注意:Lua 模式里 '-' 是 lazy 量化符,字面量需要转义 '%-'
+        assert.is_truthy(yaml:match("directory: /tmp/fake%-mnt%-us"),
             "应包含数据目录 /tmp/fake-mnt-us")
         assert.is_truthy(yaml:match("permissions: CRUD"),
             "读写模式应输出 permissions: CRUD")
