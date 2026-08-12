@@ -1,45 +1,54 @@
 -- writeConfigYAML_spec.lua
 -- 验证 webdav.koplugin 启动时生成的 YAML 配置文件格式
--- 在 PC 端用 Python busted.py 跑(KOReader 的 gettext 等运行时不存在,
--- 所以这里只用 _G 全局 stub G_reader_settings,并显式调用被测函数)
+--
+-- 实现说明: main.lua 已把 writeConfigYAML 内联(避免漏拷 webdav_config.lua 导致插件崩)。
+-- 本测试不复制实现,而是从 main.lua 文本中提取 "local webdav_config = {}" +
+-- "function webdav_config.writeConfigYAML(...)" + 匹配 end,load 后拿到 webdav_config 表。
+-- 这样 main.lua 改了实现,测试自动跟着变,不会出现测试和代码不一致。
 
--- 准备一个 mock 的 settings（不依赖 KOReader 全局 G_reader_settings）
-_G.G_reader_settings = {
-    readSetting = function(self, key)
-        local defaults = {
-            webdav_port = "3568",
-            webdav_directory = "/tmp/fake-mnt-us",
-            webdav_readonly = false,
-            webdav_username = "admin",
-            webdav_password = "webdav12345",
-        }
-        return defaults[key]
-    end,
-    isTrue = function(self, key) return false end,
-    saveSetting = function(self, key, value) end,
-    flipNilOrFalse = function(self, key) end,
-}
+local function load_webdav_config_from_main()
+    local f, open_err = io.open("webdav.koplugin/main.lua", "r")
+    if not f then
+        error("无法打开 webdav.koplugin/main.lua: " .. tostring(open_err))
+    end
+    local content = f:read("*a")
+    f:close()
 
--- 加载被测模块（webdav.koplugin/webdav_config.lua 由 Task 5 写入）
--- 默认从仓库根跑：lua tests/busted.lua tests/xxx_spec.lua
--- 也可设置环境变量 WEBDAV_CONFIG_PATH 覆盖
-local config_path = os.getenv("WEBDAV_CONFIG_PATH")
-    or "webdav.koplugin/webdav_config.lua"
-local chunk, err = loadfile(config_path)
-if not chunk then
-    -- 红阶段：模块还没写，我们要让测试失败而不是抛错
-    -- 通过调用一个不存在的全局让 busted 报 FAIL
-    writeConfigYAML = nil
-    error("无法加载被测模块 " .. config_path .. ": " .. tostring(err))
+    -- 1. 找 "local webdav_config" 起点
+    local config_start = content:find("local webdav_config%s*=")
+    if not config_start then
+        error("main.lua 中找不到 'local webdav_config ='")
+    end
+
+    -- 2. 找 writeConfigYAML 函数定义
+    local fn_start = content:find("function webdav_config%.writeConfigYAML")
+    if not fn_start then
+        error("main.lua 中找不到 'function webdav_config.writeConfigYAML'")
+    end
+
+    -- 3. 找匹配的 end(简单函数无嵌套,用 \nend\n 足够)
+    local fn_end = content:find("\nend\n", fn_start)
+    if not fn_end then
+        error("main.lua 中找不到 writeConfigYAML 的匹配 end")
+    end
+
+    -- 4. 提取从 local webdav_config 到 end 的代码,加上 return
+    local code = content:sub(config_start, fn_end + 3) .. "\nreturn webdav_config"
+    local chunk, err = load(code, "writeConfigYAML_from_main")
+    if not chunk then
+        error("load 失败: " .. tostring(err) .. "\n代码:\n" .. code)
+    end
+    return chunk()
 end
-chunk()
+
+local webdav_config = load_webdav_config_from_main()
 
 describe("writeConfigYAML", function()
     it("generates valid YAML with default settings", function()
-        local yaml = writeConfigYAML("3568", "/tmp/fake-mnt-us", false, "admin", "webdav12345")
+        local yaml = webdav_config.writeConfigYAML("3568", "/tmp/fake-mnt-us", false, "admin", "webdav12345")
         assert.is_truthy(yaml:match("port: 3568"),
             "应包含监听端口 3568")
-        -- 注意:Lua 模式里 '-' 是 lazy 量化符,字面量需要转义 '%-'
+        -- Lua 模式里 '-' 是 lazy 量化符,字面量需要转义 '%-'
         assert.is_truthy(yaml:match("directory: /tmp/fake%-mnt%-us"),
             "应包含数据目录 /tmp/fake-mnt-us")
         assert.is_truthy(yaml:match("permissions: CRUD"),
@@ -51,14 +60,20 @@ describe("writeConfigYAML", function()
     end)
 
     it("uses R permission when readonly is true", function()
-        local yaml = writeConfigYAML("3568", "/tmp/fake-mnt-us", true, "admin", "webdav12345")
+        local yaml = webdav_config.writeConfigYAML("3568", "/tmp/fake-mnt-us", true, "admin", "webdav12345")
         assert.is_truthy(yaml:match("permissions: R"),
             "只读模式应输出 permissions: R")
     end)
 
     it("binds to 0.0.0.0 so LAN clients can reach the device", function()
-        local yaml = writeConfigYAML("3568", "/tmp/fake-mnt-us", false, "admin", "webdav12345")
+        local yaml = webdav_config.writeConfigYAML("3568", "/tmp/fake-mnt-us", false, "admin", "webdav12345")
         assert.is_truthy(yaml:match("address: 0.0.0.0"),
             "应绑定 0.0.0.0 以便局域网访问")
+    end)
+
+    it("accepts numeric port (tostring)", function()
+        local yaml = webdav_config.writeConfigYAML(3568, "/mnt/us", false, "admin", "webdav12345")
+        assert.is_truthy(yaml:match("port: 3568"),
+            "数字端口应被 tostring 转换")
     end)
 end)
