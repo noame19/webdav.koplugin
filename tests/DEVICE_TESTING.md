@@ -77,7 +77,7 @@ Kindle 电源键 → 选 "Restart KOReader"（或完全退出再打开）。
 | 3.1 在"网络"分类下 | ☐ | |
 | 3.2 左侧空格（未勾选）| ☐ | |
 | 3.3 父项文字是 "WebDAV server"（或翻译后对应中文）| ☐ | |
-| 3.4 点进子菜单能看到 8 个子项（含 Force close on stop）| ☐ | |
+| 3.4 点进子菜单能看到 9 个子项（状态/端口/数据目录/文件模式/用户名/密码/开机自启/停止时强制关闭）| ☐ | |
 
 如果完全看不到 WebDAV server：先查 crash.log（见第 2 步）——
 没有 `webdav binary not found` 日志且没有 `Error when loading` 时，还要确认
@@ -106,7 +106,7 @@ Kindle 电源键 → 选 "Restart KOReader"（或完全退出再打开）。
 
 ## 5. 验证 toggle 启停
 
-- 点 **WebDAV server** 子项 1（"WebDAV server" toggle）→ 弹 "WebDAV server started..." 提示框，10 秒后自动消失
+- 点 **WebDAV 服务** 子项 1（toggle）→ 弹 "WebDAV 服务已启动..." 提示框，10 秒后自动消失；菜单第一项变 √，状态项显示"运行中"，端口/目录/文件模式/用户名/密码变灰（服务停止时才能改）
 - 提示框里应显示 Kindle 的 IP 地址和端口
 
 | 验证项 | 通过 | 备注 |
@@ -182,7 +182,7 @@ Kindle 电源键 → 选 "Restart KOReader"（或完全退出再打开）。
 
 在 Kindle 上：
 1. **Username** → 改成 `myuser` → 保存
-2. **Password** → 改成 `mypass123` → 保存
+2. **密码** → 改成 `mypass123` → 保存（密码在菜单和输入框都明文显示）
 3. 重启 webdav
 4. PC 浏览器用 `admin` / `webdav12345` 登录 → 应失败
 5. 用 `myuser` / `mypass123` 登录 → 应成功

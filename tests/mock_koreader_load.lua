@@ -31,8 +31,26 @@ M["dispatcher"] = {
         print(string.format("  [mock dispatcher] registerAction: %s (event=%s)", name, opts.event))
     end,
 }
-M["ui/widget/infomessage"] = setmetatable({}, { __call = function(_, opts) return { _opts = opts } end })
-M["ui/widget/inputdialog"] = setmetatable({}, { __call = function(_, opts) return setmetatable({_opts=opts}, {__index={onShowKeyboard=function() end, getInputText=function() return "3568" end}}) end })
+-- 极简 widget 桩: 同时支持 KOReader 标准用法 Widget:new{...}(冒号) 和直接调用
+local function mock_infomessage(opts)
+    return { _opts = opts }
+end
+local function mock_inputdialog(opts)
+    return setmetatable({ _opts = opts }, {
+        __index = {
+            onShowKeyboard = function() end,
+            getInputText = function() return "3568" end,
+        },
+    })
+end
+M["ui/widget/infomessage"] = setmetatable(
+    { new = mock_infomessage },
+    { __call = function(_, opts) return mock_infomessage(opts) end }
+)
+M["ui/widget/inputdialog"] = setmetatable(
+    { new = mock_inputdialog },
+    { __call = function(_, opts) return mock_inputdialog(opts) end }
+)
 M["ui/uimanager"] = {
     show = function() end,
     close = function() end,
@@ -85,12 +103,29 @@ M["util"] = {
     end,
 }
 M["gettext"] = function(s) return s end
+-- 文件夹选择器桩(与 KOReader 的 filemanagerutil.showChooseDialog 签名一致)
+M["apps/filemanager/filemanagerutil"] = {
+    showChooseDialog = function(title, caller_callback, current_path, default_path, file_filter, reset_button)
+        print(string.format("  [mock showChooseDialog] title=%q current=%q default=%q",
+            tostring(title), tostring(current_path), tostring(default_path)))
+        -- 模拟用户选中 /mnt/us/documents
+        caller_callback("/mnt/us/documents")
+    end,
+}
 
 -- 拦截 require
 local orig_require = require
 function require(name)
     if M[name] then return M[name] end
     return orig_require(name)
+end
+
+-- 包装 os.execute: PC 上没有 nohup/test/iptables, 只记录并假装成功,
+-- 让 toggle/start 交互路径能在 mock 里安全演练
+local orig_os_execute = os.execute
+os.execute = function(cmd)
+    print(string.format("  [mock os.execute] %s", tostring(cmd)))
+    return 0
 end
 
 -- 模拟 G_reader_settings 全局
@@ -170,6 +205,42 @@ if checked_bin_path ~= expected_bin_path then
     print("     期望: " .. expected_bin_path)
     os.exit(1)
 end
+
+print("\n=== 第 3 步: 交互路径演练(数据目录选择器 + toggle) ===")
+-- 3a. 点击"数据目录" → showChooseDialog → 回调更新设置
+local mock_touchmenu = { updateItems = function() print("  [mock touchmenu] updateItems") end }
+local ok3a = pcall(function()
+    inst:show_directory_dialog(mock_touchmenu)
+end)
+if not ok3a then
+    print("FAIL: show_directory_dialog 崩溃: " .. tostring(inst))
+    os.exit(1)
+end
+print("  目录选择后 webdav_directory = " .. inst.webdav_directory)
+if inst.webdav_directory ~= "/mnt/us/documents" then
+    print("FAIL: 目录选择回调未生效")
+    os.exit(1)
+end
+
+-- 3b. toggle(未运行 → start) → 不应抛异常
+local ok3b = pcall(function()
+    inst:onToggleWebDAVServer()
+end)
+if not ok3b then
+    print("FAIL: onToggleWebDAVServer 崩溃")
+    os.exit(1)
+end
+print("  toggle(start) 无异常")
+
+-- 3c. 再次 toggle(此时 PID 文件不存在, 仍走 start 分支) 不应抛异常
+local ok3c = pcall(function()
+    inst:onToggleWebDAVServer()
+end)
+if not ok3c then
+    print("FAIL: 二次 toggle 崩溃")
+    os.exit(1)
+end
+print("  toggle(再次) 无异常")
 
 print("\n=== 模拟加载成功(与真机路径语义一致) ===")
 print("依赖检查路径: " .. checked_bin_path)

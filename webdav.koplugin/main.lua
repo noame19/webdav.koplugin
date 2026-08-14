@@ -128,18 +128,8 @@ local function has_control_char(s)
     return s:find("[\x00-\x1f\x7f]") ~= nil
 end
 
--- 验证目录: 存在 → ok; 不存在 → mkdir -p; 都失败 → 报错
--- 用 %q 防 shell 注入
-local function validate_directory(value)
-    if util.pathExists(value) then return true end
-    if os.execute(string.format("mkdir -p %q", value)) ~= 0 then
-        return false, "mkdir failed"
-    end
-    if not util.pathExists(value) then
-        return false, "mkdir reported success but dir is still missing"
-    end
-    return true
-end
+-- 数据目录现在用 KOReader 文件夹选择器(filemanagerutil.showChooseDialog),
+-- 只能选已存在的目录, 不再需要 validate_directory / mkdir。
 
 -- 插件类
 local WebDAV = WidgetContainer:extend{
@@ -237,7 +227,7 @@ function WebDAV:start()
         if os.execute(string.format("test -x %q", BIN_PATH)) ~= 0 then
             UIManager:show(InfoMessage:new{
                 icon = "notice-warning",
-                text = T(_("Cannot execute %1. Check file permissions."), BIN_PATH),
+                text = T(_("无法执行 %1。请检查文件权限。"), BIN_PATH),
             })
             return
         end
@@ -249,7 +239,7 @@ function WebDAV:start()
         if os.execute(string.format("mkdir -p %q", settings_dir)) ~= 0 then
             UIManager:show(InfoMessage:new{
                 icon = "notice-warning",
-                text = T(_("Failed to create settings directory: %1"), settings_dir),
+                text = T(_("无法创建设置目录: %1"), settings_dir),
             })
             return
         end
@@ -267,7 +257,7 @@ function WebDAV:start()
     if not f then
         UIManager:show(InfoMessage:new{
             icon = "notice-warning",
-            text = T(_("Cannot write config file: %1"), self.config_path),
+            text = T(_("无法写入配置文件: %1"), self.config_path),
         })
         return
     end
@@ -284,13 +274,13 @@ function WebDAV:start()
     local cmd = string.format(
         "nohup %q -c %q > %s 2>&1 & echo $! > %s",
         BIN_PATH, self.config_path, LOG_PATH, PID_PATH)
-    logger.dbg("[Network] Launching WebDAV server:", cmd)
+    logger.info("[Network] Launching WebDAV server:", cmd)
     if os.execute(cmd) ~= 0 then
         -- shell 本身就 launch 失败(noexec / nohup 不存在等), 清理半套状态
         self:applyKindleFirewall(false)
         UIManager:show(InfoMessage:new{
             icon = "notice-warning",
-            text = _("Failed to launch WebDAV process."),
+            text = _("启动 WebDAV 进程失败。"),
         })
         return
     end
@@ -305,7 +295,7 @@ function WebDAV:start()
         self:applyKindleFirewall(false)
         UIManager:show(InfoMessage:new{
             icon = "notice-warning",
-            text = T(_("WebDAV process exited immediately. See %1 for details.\n\nPort: %2\nDirectory: %3"),
+            text = T(_("WebDAV 进程启动后立即退出。详情见 %1。\n\n端口: %2\n目录: %3"),
                 LOG_PATH, self.webdav_port, self.webdav_directory),
             timeout = 8,
         })
@@ -314,10 +304,10 @@ function WebDAV:start()
 
     UIManager:show(InfoMessage:new{
         timeout = 10,
-        text = T(_("WebDAV server started.\n\nWebDAV port: %1\n%2"),
+        text = T(_("WebDAV 服务已启动\n\nWebDAV 端口: %1\n%2"),
             self.webdav_port,
             Device.retrieveNetworkInfo and Device:retrieveNetworkInfo()
-                or _("Could not retrieve network info.")),
+                or _("无法获取网络信息。")),
     })
 end
 
@@ -374,20 +364,20 @@ function WebDAV:stop()
             os.remove(PID_PATH)
             self:applyKindleFirewall(false)
             UIManager:show(InfoMessage:new{
-                text = _("WebDAV server forcefully stopped."),
+                text = _("WebDAV 服务已被强制停止。"),
                 timeout = 2,
             })
             return
         end
         UIManager:show(InfoMessage:new{
             icon = "notice-warning",
-            text = _("WebDAV server is still shutting down… Active connections may remain until they are closed."),
+            text = _("WebDAV 服务仍在关闭中… 活动连接可能要等客户端关闭后才断开。"),
             timeout = 3,
         })
         return
     end
     UIManager:show(InfoMessage:new{
-        text = _("WebDAV server stopped."),
+        text = _("WebDAV 服务已停止。"),
         timeout = 2,
     })
 end
@@ -414,11 +404,24 @@ function WebDAV:deletePluginSettings()
 end
 
 -- 主菜单 toggle 行为
+-- 注意: KOReader 的 PluginLoader 会把 on* 事件处理器包进 HandlerSandbox,
+-- 其中任何异常只会写 crash.log 而不会弹窗(表现为"点击没反应")。
+-- 所以这里再包一层 pcall, 把错误直接弹给用户看, 便于定位。
 function WebDAV:onToggleWebDAVServer()
-    if self:isRunning() then
-        self:stop()
-    else
-        self:start()
+    local ok, err = pcall(function()
+        if self:isRunning() then
+            self:stop()
+        else
+            self:start()
+        end
+    end)
+    if not ok then
+        logger.err("[Network] Toggle WebDAV server failed:", err)
+        UIManager:show(InfoMessage:new{
+            icon = "notice-warning",
+            text = T(_("切换 WebDAV 服务失败: %1"), tostring(err)),
+            timeout = 10,
+        })
     end
 end
 
@@ -426,16 +429,18 @@ end
 function WebDAV:onDispatcherRegisterActions()
     Dispatcher:registerAction("toggle_webdav_server",
         { category = "none", event = "ToggleWebDAVServer",
-          title = _("Toggle WebDAV server"), general = true })
+          title = _("切换 WebDAV 服务"), general = true })
 end
 
 -- 主菜单注册
 -- sorting_hint = "network" 把本项挂到"设置 → 网络"分组下
 -- (KOReader MenuSorter 通过 sorting_hint 把菜单项归入已有分组;
 --  不带 hint 的项会以孤儿项出现在主菜单最前面并带 "…" 前缀)
+-- 文案按 docs/superpowers/specs/2026-08-11-koreader-webdav-plugin-design.md
+-- §15.3 的英文/中文对照表(中文直接作为 gettext key, 未翻译时显示中文原文)。
 function WebDAV:addToMainMenu(menu_items)
     menu_items.webdav = {
-        text = _("WebDAV server"),
+        text = _("WebDAV 服务"),
         sorting_hint = "network",
         checked_func = function() return self:isRunning() end,
         hold_callback = function(touchmenu_instance)
@@ -446,7 +451,7 @@ function WebDAV:addToMainMenu(menu_items)
         sub_item_table = {
             -- 子项 1: 启用 toggle
             {
-                text = _("WebDAV server"),
+                text = _("WebDAV 服务"),
                 checked_func = function() return self:isRunning() end,
                 check_callback_updates_menu = true,
                 callback = function(touchmenu_instance)
@@ -455,10 +460,16 @@ function WebDAV:addToMainMenu(menu_items)
                     touchmenu_instance:updateItems()
                 end,
             },
-            -- 子项 2: 端口
+            -- 子项 2: 状态(纯显示, 运行中/未运行)
             {
                 text_func = function()
-                    return T(_("WebDAV port: %1"), self.webdav_port)
+                    return self:isRunning() and _("状态: 运行中") or _("状态: 未运行")
+                end,
+            },
+            -- 子项 3: 端口
+            {
+                text_func = function()
+                    return T(_("WebDAV 端口: %1"), self.webdav_port)
                 end,
                 keep_menu_open = true,
                 enabled_func = function() return not self:isRunning() end,
@@ -466,10 +477,11 @@ function WebDAV:addToMainMenu(menu_items)
                     self:show_port_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 3: 数据目录
+            -- 子项 4: 数据目录(KOReader 文件夹选择器, 与屏保插件的
+            -- "选择随机图片文件夹"同款, 不用手动输入路径)
             {
                 text_func = function()
-                    return T(_("Data directory: %1"), self.webdav_directory)
+                    return T(_("数据目录: %1"), self.webdav_directory)
                 end,
                 keep_menu_open = true,
                 enabled_func = function() return not self:isRunning() end,
@@ -477,11 +489,11 @@ function WebDAV:addToMainMenu(menu_items)
                     self:show_directory_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 4: 文件模式 toggle(勾上=读写)
+            -- 子项 5: 文件模式 toggle(勾上=读写)
             {
                 text_func = function()
-                    return T(_("File mode: %1"),
-                        self.webdav_readonly and _("Read only") or _("Read/Write"))
+                    return T(_("文件模式: %1"),
+                        self.webdav_readonly and _("只读") or _("读写"))
                 end,
                 checked_func = function() return not self.webdav_readonly end,
                 enabled_func = function() return not self:isRunning() end,
@@ -491,10 +503,10 @@ function WebDAV:addToMainMenu(menu_items)
                     G_reader_settings:flipNilOrFalse("webdav_readonly")
                 end,
             },
-            -- 子项 5: 用户名
+            -- 子项 6: 用户名
             {
                 text_func = function()
-                    return T(_("Username: %1"), self.webdav_username)
+                    return T(_("用户名: %1"), self.webdav_username)
                 end,
                 keep_menu_open = true,
                 enabled_func = function() return not self:isRunning() end,
@@ -502,21 +514,21 @@ function WebDAV:addToMainMenu(menu_items)
                     self:show_username_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 6: 密码(菜单里遮罩显示, 对话框内可编辑)
+            -- 子项 7: 密码(明文显示, 用户要求)
             {
                 text_func = function()
-                    return T(_("Password: %1"), string.rep("*", #self.webdav_password))
+                    return T(_("密码: %1"), self.webdav_password)
                 end,
-                help_text = _("Stored in plaintext in KOReader settings. Visible to anyone with shell access to the device."),
+                help_text = _("以明文存储在 KOReader 设置中。任何能访问设备 shell 的人都可以看到。"),
                 keep_menu_open = true,
                 enabled_func = function() return not self:isRunning() end,
                 callback = function(touchmenu_instance)
                     self:show_password_dialog(touchmenu_instance)
                 end,
             },
-            -- 子项 7: 开机自启
+            -- 子项 8: 开机自启
             {
-                text = _("Start with KOReader"),
+                text = _("开机自启"),
                 checked_func = function() return self.autostart end,
                 keep_menu_open = true,
                 callback = function()
@@ -524,10 +536,10 @@ function WebDAV:addToMainMenu(menu_items)
                     G_reader_settings:flipNilOrFalse("webdav_autostart")
                 end,
             },
-            -- 子项 8: 强制关停(separator 分组, 与 SSH 插件 force_kill_clients 对齐)
+            -- 子项 9: 强制关停(separator 分组, 与 SSH 插件 force_kill_clients 对齐)
             {
-                text = _("Force close on stop"),
-                help_text = _("When enabled, all active WebDAV sessions are terminated immediately when stopping the server. Use this if a long upload or transfer is blocking shutdown."),
+                text = _("停止时强制关闭"),
+                help_text = _("启用后，停止服务时会立即终止所有活动的 WebDAV 会话。如果长时间上传或传输阻塞了关闭，请使用此选项。"),
                 checked_func = function() return self.force_kill_clients end,
                 callback = function()
                     self.force_kill_clients = not self.force_kill_clients
@@ -542,21 +554,21 @@ end
 -- 端口 InputDialog
 function WebDAV:show_port_dialog(touchmenu_instance)
     self.port_dialog = InputDialog:new{
-        title = _("WebDAV port"),
+        title = _("设置 WebDAV 端口"),
         input = self.webdav_port,
         input_type = "number",
         input_hint = self.webdav_port,
         buttons = {
             {
                 {
-                    text = _("Cancel"),
+                    text = _("取消"),
                     id = "close",
                     callback = function()
                         UIManager:close(self.port_dialog)
                     end,
                 },
                 {
-                    text = _("Save"),
+                    text = _("保存"),
                     is_enter_default = true,
                     callback = function()
                         local value = tonumber(self.port_dialog:getInputText())
@@ -569,7 +581,7 @@ function WebDAV:show_port_dialog(touchmenu_instance)
                         else
                             UIManager:show(InfoMessage:new{
                                 icon = "notice-warning",
-                                text = _("Port must be an integer between 1 and 65535."),
+                                text = _("端口必须是 1 到 65535 之间的整数。"),
                                 timeout = 3,
                             })
                         end
@@ -582,90 +594,54 @@ function WebDAV:show_port_dialog(touchmenu_instance)
     self.port_dialog:onShowKeyboard()
 end
 
--- 数据目录 InputDialog
+-- 数据目录选择
+-- 复用 KOReader 官方的文件夹选择器(filemanagerutil.showChooseDialog,
+-- 内部是 PathChooser, 与屏保插件"选择随机图片文件夹"完全同款),
+-- 用户浏览目录树点选即可, 不用手动输入路径。
+-- 提供 "使用默认" 按钮(default_path="/mnt/us")一键回到默认值。
 function WebDAV:show_directory_dialog(touchmenu_instance)
-    self.directory_dialog = InputDialog:new{
-        title = _("Data directory"),
-        input = self.webdav_directory,
-        input_type = "text",
-        input_hint = "/mnt/us",
-        buttons = {
-            {
-                {
-                    text = _("Cancel"),
-                    id = "close",
-                    callback = function()
-                        UIManager:close(self.directory_dialog)
-                    end,
-                },
-                {
-                    text = _("Save"),
-                    is_enter_default = true,
-                    callback = function()
-                        local value = trim(self.directory_dialog:getInputText())
-                        if value == "" then
-                            UIManager:show(InfoMessage:new{
-                                icon = "notice-warning",
-                                text = _("Directory cannot be empty."),
-                                timeout = 3,
-                            })
-                            return
-                        end
-                        if has_control_char(value) then
-                            UIManager:show(InfoMessage:new{
-                                icon = "notice-warning",
-                                text = _("Directory contains invalid characters."),
-                                timeout = 3,
-                            })
-                            return
-                        end
-                        local ok, err = validate_directory(value)
-                        if not ok then
-                            UIManager:show(InfoMessage:new{
-                                icon = "notice-warning",
-                                text = T(_("Cannot use directory %1: %2"), value, err or "unknown error"),
-                                timeout = 5,
-                            })
-                            return
-                        end
-                        self.webdav_directory = value
-                        G_reader_settings:saveSetting("webdav_directory", self.webdav_directory)
-                        UIManager:close(self.directory_dialog)
-                        touchmenu_instance:updateItems()
-                    end,
-                },
-            },
-        },
-    }
-    UIManager:show(self.directory_dialog)
-    self.directory_dialog:onShowKeyboard()
+    local filemanagerutil = require("apps/filemanager/filemanagerutil")
+    filemanagerutil.showChooseDialog(
+        _("当前 WebDAV 数据目录:"),
+        function(path)
+            self.webdav_directory = path
+            G_reader_settings:saveSetting("webdav_directory", self.webdav_directory)
+            if touchmenu_instance then
+                touchmenu_instance:updateItems()
+            end
+        end,
+        self.webdav_directory,
+        "/mnt/us",
+        nil, -- file_filter: 只选目录, 不选文件
+        nil  -- reset_button
+    )
 end
 
 -- 用户名 InputDialog
 function WebDAV:show_username_dialog(touchmenu_instance)
     self.username_dialog = InputDialog:new{
-        title = _("Username"),
+        title = _("设置 WebDAV 用户名"),
         input = self.webdav_username,
         input_type = "text",
         input_hint = "admin",
         buttons = {
             {
                 {
-                    text = _("Cancel"),
+                    text = _("取消"),
                     id = "close",
                     callback = function()
                         UIManager:close(self.username_dialog)
                     end,
                 },
                 {
-                    text = _("Save"),
+                    text = _("保存"),
                     is_enter_default = true,
                     callback = function()
                         local value = trim(self.username_dialog:getInputText())
                         if value == "" then
                             UIManager:show(InfoMessage:new{
                                 icon = "notice-warning",
-                                text = _("Username cannot be empty."),
+                                text = _("用户名不能为空。"),
                                 timeout = 3,
                             })
                             return
@@ -673,7 +649,7 @@ function WebDAV:show_username_dialog(touchmenu_instance)
                         if has_control_char(value) then
                             UIManager:show(InfoMessage:new{
                                 icon = "notice-warning",
-                                text = _("Username contains invalid characters."),
+                                text = _("用户名包含无效字符。"),
                                 timeout = 3,
                             })
                             return
@@ -691,33 +667,31 @@ function WebDAV:show_username_dialog(touchmenu_instance)
     self.username_dialog:onShowKeyboard()
 end
 
--- 密码 InputDialog
--- 注意: KOReader 的密码遮罩参数是 text_type = "password"(InputText 的字段,
--- 附带 "Show password" 开关), 不是 input_type; input_type 只决定键盘类型。
+-- 密码 InputDialog(明文显示, 用户要求)
 function WebDAV:show_password_dialog(touchmenu_instance)
     self.password_dialog = InputDialog:new{
-        title = _("Password"),
+        title = _("设置 WebDAV 密码"),
         input = self.webdav_password,
-        text_type = "password",
-        input_hint = "********",
+        input_type = "text",
+        input_hint = self.webdav_password,
         buttons = {
             {
                 {
-                    text = _("Cancel"),
+                    text = _("取消"),
                     id = "close",
                     callback = function()
                         UIManager:close(self.password_dialog)
                     end,
                 },
                 {
-                    text = _("Save"),
+                    text = _("保存"),
                     is_enter_default = true,
                     callback = function()
                         local value = self.password_dialog:getInputText()
                         if value == "" then
                             UIManager:show(InfoMessage:new{
                                 icon = "notice-warning",
-                                text = _("Password cannot be empty."),
+                                text = _("密码不能为空。"),
                                 timeout = 3,
                             })
                             return
@@ -725,7 +699,7 @@ function WebDAV:show_password_dialog(touchmenu_instance)
                         if has_control_char(value) then
                             UIManager:show(InfoMessage:new{
                                 icon = "notice-warning",
-                                text = _("Password contains invalid characters."),
+                                text = _("密码包含无效字符。"),
                                 timeout = 3,
                             })
                             return
