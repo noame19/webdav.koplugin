@@ -18,7 +18,10 @@ package.path = "./?.lua;./webdav.koplugin/?.lua;./tests/?.lua;" .. package.path
 -- mock 所有 KOReader SDK 模块
 local M = {}
 M["ui/bidi"] = { filepath = function(p) return p end }
-M["datastorage"] = { getFullDataDir = function() return REPO_ROOT .. "/" end }
+-- 注意: 与真实 KOReader 一致, getFullDataDir() **不带尾斜杠**
+-- (datastorage.lua: "e.g., /mnt/onboard/.adds/koreader")。
+-- 之前 mock 返回带 "/" 的路径, 掩盖了 main.lua 拼接路径缺斜杠的 bug。
+M["datastorage"] = { getFullDataDir = function() return REPO_ROOT end }
 M["device"] = {
     isKindle = function() return false end,
     retrieveNetworkInfo = function() return "127.0.0.1 (mock)" end,
@@ -63,8 +66,14 @@ M["logger"] = {
     err = function(...) print("[err]", ...) end,
 }
 -- 真实存在性检查(io.open 读文件; 目录以尾斜杠形式调用时也能识别)
+-- 回归防护: 记录被检查的路径, 加载完成后断言它符合绝对路径拼接规则
+-- (getFullDataDir() 无尾斜杠, 插件必须自己补 "/")
+local checked_bin_path = nil
 M["util"] = {
     pathExists = function(p)
+        if not checked_bin_path and p:find("webdav%.koplugin/webdav$") then
+            checked_bin_path = p
+        end
         local ok = false
         local f = io.open(p, "rb")
         if f then
@@ -152,5 +161,16 @@ print("实例字段: " .. table.concat((function()
     return t
 end)(), ", "))
 
+-- 回归断言: 依赖检查用的路径必须等于 <data_dir>/webdav.koplugin/webdav
+-- (mock 的 getFullDataDir 返回无尾斜杠的 REPO_ROOT, 与真实 API 一致)。
+-- 如果 main.lua 拼接时漏了 "/", 这里会得到 REPO_ROOT .. "webdav.koplugin/..." 并 FAIL。
+local expected_bin_path = REPO_ROOT .. "/webdav.koplugin/webdav"
+if checked_bin_path ~= expected_bin_path then
+    print("FAIL: 依赖检查路径不符合预期: " .. tostring(checked_bin_path))
+    print("     期望: " .. expected_bin_path)
+    os.exit(1)
+end
+
 print("\n=== 模拟加载成功(与真机路径语义一致) ===")
+print("依赖检查路径: " .. checked_bin_path)
 os.exit(0)

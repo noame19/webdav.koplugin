@@ -41,6 +41,13 @@ local LOG_PATH = "/tmp/webdav_koreader.log"
 local SETTINGS_DIR_NAME = "webdav"
 local CONFIG_FILE_NAME = "config.yml"
 
+-- 路径拼接: DataStorage:getFullDataDir() 返回的是**不带尾斜杠**的目录
+-- (如 /mnt/us/koreader, 见 datastorage.lua 文档示例), 必须显式补 "/"。
+local function join_path(base, tail)
+    if base:sub(-1) == "/" then return base .. tail end
+    return base .. "/" .. tail
+end
+
 -- 插件目录定位: 从当前 chunk 的加载路径推导, 兼容默认安装位置和
 -- extra_plugin_paths; 推导失败时回退到默认安装位置。
 local function get_plugin_dir()
@@ -51,9 +58,9 @@ local function get_plugin_dir()
         if dir:sub(1, 1) == "/" then return dir end
         -- 相对路径(如 "plugins/webdav.koplugin"), 以 KOReader 工作目录为基准绝对化
         dir = dir:gsub("^%.?/", "")
-        return DataStorage:getFullDataDir() .. dir
+        return join_path(DataStorage:getFullDataDir(), dir)
     end
-    return DataStorage:getFullDataDir() .. "plugins/webdav.koplugin"
+    return join_path(DataStorage:getFullDataDir(), "plugins/webdav.koplugin")
 end
 
 local PLUGIN_DIR = get_plugin_dir()
@@ -237,7 +244,7 @@ function WebDAV:start()
     end
 
     -- 2. mkdir settings 目录(失败显式报告, 不再静默)
-    local settings_dir = path .. "settings/" .. SETTINGS_DIR_NAME
+    local settings_dir = join_path(path, "settings/" .. SETTINGS_DIR_NAME)
     if not util.pathExists(settings_dir) then
         if os.execute(string.format("mkdir -p %q", settings_dir)) ~= 0 then
             UIManager:show(InfoMessage:new{
@@ -400,7 +407,7 @@ function WebDAV:deletePluginSettings()
     for _, key in ipairs(keys) do
         G_reader_settings:delSetting(key)
     end
-    local settings_dir = path .. "settings/" .. SETTINGS_DIR_NAME
+    local settings_dir = join_path(path, "settings/" .. SETTINGS_DIR_NAME)
     if util.pathExists(settings_dir) then
         os.execute(string.format("rm -rf %q", settings_dir))
     end
