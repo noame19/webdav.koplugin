@@ -213,7 +213,8 @@ function WebDAV:init()
     self.webdav_username = G_reader_settings:readSetting("webdav_username") or "admin"
     self.webdav_password = G_reader_settings:readSetting("webdav_password") or "webdav12345"
     self.autostart = G_reader_settings:isTrue("webdav_autostart")
-    self.force_kill_clients = G_reader_settings:isTrue("webdav_force_kill_clients")
+    -- 调试日志开关: 开启时 webdav 日志写 /tmp/webdav_koreader.log, 关闭时丢弃
+    self.webdav_debug_log = G_reader_settings:isTrue("webdav_debug_log")
 
     if self.autostart then
         -- pcall 包住: 即使 start() 出错, 也要让菜单能注册
@@ -283,12 +284,15 @@ function WebDAV:start()
     self:applyKindleFirewall(true)
 
     -- 5. 启动并保存 PID
-    -- nohup + 重定向到 log 文件:
-    --   - nohup 防止 KOReader 退出时 SIGHUP 把 webdav 带走
-    --   - log 文件给后面探活失败时排错用
+    -- nohup 防止 KOReader 退出时 SIGHUP 把 webdav 带走。
+    -- 内存/GC: GOMEMLIMIT=64MiB 限制 Go 堆软上限, GOGC=400 降低 GC 频率
+    --   (空闲时 GC 几乎不再触发, CPU 近零; 传大文件为流式, 64MiB 足够)。
+    -- 日志: 调试开关开启时写 /tmp/webdav_koreader.log(注意 Kindle 的 /tmp 是
+    --   tmpfs, 日志增长会占内存); 关闭时丢弃到 /dev/null。
+    local log_target = self.webdav_debug_log and LOG_PATH or "/dev/null"
     local cmd = string.format(
-        "nohup %q -c %q > %s 2>&1 & echo $! > %s",
-        BIN_PATH, self.config_path, LOG_PATH, PID_PATH)
+        "GOMEMLIMIT=64MiB GOGC=400 nohup %q -c %q > %s 2>&1 & echo $! > %s",
+        BIN_PATH, self.config_path, log_target, PID_PATH)
     logger.info("[Network] Launching WebDAV server:", cmd)
     if os.execute(cmd) ~= 0 then
         -- shell 本身就 launch 失败(noexec / nohup 不存在等), 清理半套状态
@@ -308,10 +312,14 @@ function WebDAV:start()
         -- 启动失败, 清理全部状态
         os.remove(PID_PATH)
         self:applyKindleFirewall(false)
+        -- 调试日志关闭时日志进了 /dev/null, 提示用户先开开关再重试
+        local detail = self.webdav_debug_log
+            and T(_("详情见 %1。"), LOG_PATH)
+            or _("可先开启「调试日志」开关后重试, 以便查看原因。")
         UIManager:show(InfoMessage:new{
             icon = "notice-warning",
-            text = T(_("WebDAV 进程启动后立即退出。详情见 %1。\n\n端口: %2\n目录: %3"),
-                LOG_PATH, self.webdav_port, self.webdav_directory),
+            text = T(_("WebDAV 进程启动后立即退出。%1\n\n端口: %2\n目录: %3"),
+                detail, self.webdav_port, self.webdav_directory),
             timeout = 8,
         })
         return
@@ -369,12 +377,14 @@ function WebDAV:stopPlugin(force)
 end
 
 -- 用户面停进程入口
+-- 说明: 原"停止时强制关闭"开关已移除 —— webdav 是单进程 HTTP 服务,
+-- SIGTERM 后唯一可能挂住的是活跃传输连接, 个人使用几乎遇不到;
+-- 强制终止能力保留为默认行为(优雅 → 强杀 → killall 三级兜底)。
 function WebDAV:stop()
-    local ok, err = self:stopPlugin(self.force_kill_clients)
+    local ok, err = self:stopPlugin(true)
     if not ok then
         logger.warn("WebDAV: stop failed:", err)
-        -- 兜底: 用 force_kill_clients 还是停不掉, 直接 killall 干掉所有 webdav
-        -- (仿 SSH.koplugin 的最后兜底)
+        -- 兜底: 强杀还是停不掉, 直接 killall 干掉所有 webdav
         if os.execute("killall -9 webdav 2>/dev/null") == 0 then
             os.remove(PID_PATH)
             self:applyKindleFirewall(false)
@@ -407,7 +417,8 @@ function WebDAV:deletePluginSettings()
         "webdav_username",
         "webdav_password",
         "webdav_autostart",
-        "webdav_force_kill_clients",
+        "webdav_debug_log",
+        "webdav_force_kill_clients", -- 旧版遗留键, 一并清理
     }
     for _, key in ipairs(keys) do
         G_reader_settings:delSetting(key)
@@ -551,14 +562,17 @@ function WebDAV:addToMainMenu(menu_items)
                     G_reader_settings:flipNilOrFalse("webdav_autostart")
                 end,
             },
-            -- 子项 9: 强制关停(separator 分组, 与 SSH 插件 force_kill_clients 对齐)
+            -- 子项 9: 调试日志(separator 分组)
+            -- 说明: 原"停止时强制关闭"开关已移除, 停止时固定"优雅→强杀→killall"兜底;
+            -- 该开关位让给"调试日志": 开启后 webdav 日志落盘, 便于排查启动问题。
             {
-                text = _("停止时强制关闭"),
-                help_text = _("启用后，停止服务时会立即终止所有活动的 WebDAV 会话。如果长时间上传或传输阻塞了关闭，请使用此选项。"),
-                checked_func = function() return self.force_kill_clients end,
+                text = _("调试日志"),
+                help_text = _("开启后，webdav 服务日志写入 /tmp/webdav_koreader.log，便于排查启动问题。默认关闭（日志丢弃，不占用内存）。"),
+                checked_func = function() return self.webdav_debug_log end,
+                keep_menu_open = true,
                 callback = function()
-                    self.force_kill_clients = not self.force_kill_clients
-                    G_reader_settings:flipNilOrFalse("webdav_force_kill_clients")
+                    self.webdav_debug_log = not self.webdav_debug_log
+                    G_reader_settings:flipNilOrFalse("webdav_debug_log")
                 end,
                 separator = true,
             },
