@@ -21,6 +21,3 @@ tests/.luacov*
 
 # Device crash log (copied to repo root for debugging, never commit)
 crash.log
-
-# Don't ignore the webdav binary (committed intentionally from hacdias/webdav releases)
-!webdav.koplugin/webdav
