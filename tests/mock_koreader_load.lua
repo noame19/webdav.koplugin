@@ -1,18 +1,30 @@
 -- tests/mock_koreader_load.lua
--- 极简 KOReader mock: 把 main.lua 真正 load 起来, 找出加载/初始化阶段的错误
+-- 极简 KOReader mock: 把 main.lua 真正 load 起来, 找出加载/初始化阶段的错误。
+--
+-- 2026 修订: 之前这里硬编码 pathExists("webdav") = true, 恰好掩盖了插件在真机上
+-- 加载失败的真实原因(相对路径检查 + 目录假设)。现在:
+--   * datastorage.getFullDataDir 返回本仓库根目录(绝对路径)
+--   * util.pathExists 用 io.open 做真实存在性检查
+-- 这样 main.lua 里的绝对路径依赖检查(BIN_PATH)在 PC 上就能如实复现设备行为:
+--   二进制在仓库里存在 → 加载成功; 临时移走 → 返回 disabled。
+
+-- 推导仓库根: 兼容绝对/相对路径与 / 或 \ 分隔符
+local _src = (debug.getinfo(1, "S").source or ""):gsub("^@", "")
+local _dir = _src:match("^(.*)[/\\][^/\\]+$") or "."
+local REPO_ROOT = _dir:match("^(.*)[/\\]tests$") or (_dir == "tests" and "." or _dir)
 
 package.path = "./?.lua;./webdav.koplugin/?.lua;./tests/?.lua;" .. package.path
 
 -- mock 所有 KOReader SDK 模块
 local M = {}
 M["ui/bidi"] = { filepath = function(p) return p end }
-M["datastorage"] = { getFullDataDir = function() return "/tmp/koreader-data" end }
+M["datastorage"] = { getFullDataDir = function() return REPO_ROOT .. "/" end }
 M["device"] = {
     isKindle = function() return false end,
     retrieveNetworkInfo = function() return "127.0.0.1 (mock)" end,
 }
 M["dispatcher"] = {
-    registerAction = function(name, opts)
+    registerAction = function(self, name, opts)
         print(string.format("  [mock dispatcher] registerAction: %s (event=%s)", name, opts.event))
     end,
 }
@@ -50,11 +62,17 @@ M["logger"] = {
     warn = function(...) print("[warn]", ...) end,
     err = function(...) print("[err]", ...) end,
 }
+-- 真实存在性检查(io.open 读文件; 目录以尾斜杠形式调用时也能识别)
 M["util"] = {
     pathExists = function(p)
-        print(string.format("  [mock util.pathExists] %s", p))
-        if p == "webdav" then return true end
-        return false
+        local ok = false
+        local f = io.open(p, "rb")
+        if f then
+            ok = true
+            f:close()
+        end
+        print(string.format("  [mock util.pathExists] %s -> %s", p, tostring(ok)))
+        return ok
     end,
 }
 M["gettext"] = function(s) return s end
@@ -82,6 +100,9 @@ _G.G_reader_settings = {
         print(string.format("  [mock saveSetting] %s = %s", key, tostring(value)))
     end,
     flipNilOrFalse = function(self, key) end,
+    delSetting = function(self, key)
+        print(string.format("  [mock delSetting] %s", key))
+    end,
 }
 
 -- 模拟菜单 UI
@@ -108,12 +129,12 @@ print("=== 第 1 步: dofile('webdav.koplugin/main.lua') ===")
 local ok, WebDAV_or_err = pcall(function() return dofile("webdav.koplugin/main.lua") end)
 if not ok then
     print("LOAD 阶段崩溃: " .. tostring(WebDAV_or_err))
-    return
+    os.exit(1)
 end
 print("dofile 返回: type=" .. type(WebDAV_or_err))
 if type(WebDAV_or_err) == "table" and WebDAV_or_err.disabled then
-    print("插件返回 { disabled = true }, 不会被加载")
-    return
+    print("插件返回 { disabled = true }, 不会被加载(检查二进制是否存在)")
+    os.exit(1)
 end
 
 print("\n=== 第 2 步: WebDAV:new{ui=...}  (会触发 init) ===")
@@ -122,9 +143,14 @@ local ok2, inst = pcall(function()
 end)
 if not ok2 then
     print("INIT 阶段崩溃: " .. tostring(inst))
-    return
+    os.exit(1)
 end
 print("实例化成功")
 print("实例字段: " .. table.concat((function()
-    local t = {}; for k in pairs(inst) do t[#t+1] = k end; return t
+    local t = {}; for k in pairs(inst) do t[#t+1] = k end
+    table.sort(t)
+    return t
 end)(), ", "))
+
+print("\n=== 模拟加载成功(与真机路径语义一致) ===")
+os.exit(0)

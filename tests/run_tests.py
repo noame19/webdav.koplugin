@@ -75,11 +75,36 @@ def run_unit_tests(lua: str) -> bool:
     return ok
 
 
+def run_mock_load(lua: str) -> bool:
+    """用 mock_koreader_load.lua 以真实路径语义加载插件, 复现 KOReader 的 dofile 流程."""
+    print("\n[2/5] 模拟 KOReader 加载 (mock_koreader_load.lua):")
+    result = subprocess.run(
+        [lua, str(TESTS_DIR / "mock_koreader_load.lua")],
+        cwd=str(REPO_ROOT),
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    for line in result.stdout.rstrip().splitlines():
+        print(f"  {line}")
+    if result.returncode != 0:
+        print(f"  FAIL  mock 加载失败 (exit {result.returncode})")
+        return False
+    print("  OK    加载 + init 成功")
+    return True
+
+
 def check_lua_syntax(luac: str) -> bool:
-    print("\n[2/4] Lua 语法检查:")
+    print("\n[3/5] Lua 语法 + BOM 检查:")
     lua_files = sorted(PLUGIN_DIR.glob("*.lua")) + sorted(TESTS_DIR.glob("*.lua"))
     ok = True
     for f in lua_files:
+        # BOM 检查: 带 BOM 的 chunk 在部分 LuaJIT 版本上直接语法错误,
+        # 插件会完全无法加载(PC 端 luac 会跳过 BOM, 所以必须显式检查)
+        with open(f, "rb") as fh:
+            head = fh.read(3)
+        if head == b"\xef\xbb\xbf":
+            print(f"  FAIL  {f.relative_to(REPO_ROOT)}: 文件以 UTF-8 BOM 开头, 设备上可能无法加载")
+            ok = False
+            continue
         result = subprocess.run(
             [luac, "-p", str(f)],
             capture_output=True, text=True, encoding="utf-8",
@@ -93,7 +118,7 @@ def check_lua_syntax(luac: str) -> bool:
 
 
 def check_binary() -> bool:
-    print("\n[3/4] webdav 二进制检查:")
+    print("\n[4/5] webdav 二进制检查:")
     bin_path = PLUGIN_DIR / "webdav"
     if not bin_path.exists():
         print(f"  FAIL  {bin_path} 不存在")
@@ -122,7 +147,7 @@ def check_binary() -> bool:
 
 
 def check_layout() -> bool:
-    print("\n[4/4] 仓库结构检查:")
+    print("\n[5/5] 仓库结构检查:")
     expected = [
         PLUGIN_DIR / "_meta.lua",
         PLUGIN_DIR / "main.lua",
@@ -165,7 +190,8 @@ def main() -> int:
 
     results = {
         "单元测试": run_unit_tests(lua),
-        "Lua 语法": check_lua_syntax(luac),
+        "模拟加载": run_mock_load(lua),
+        "Lua 语法/BOM": check_lua_syntax(luac),
         "webdav 二进制": check_binary(),
         "仓库结构": check_layout(),
     }

@@ -76,4 +76,77 @@ describe("writeConfigYAML", function()
         assert.is_truthy(yaml:match("port: 3568"),
             "数字端口应被 tostring 转换")
     end)
+
+    it("quotes password containing colon-space (YAML injection defense)", function()
+        -- 攻击 payload: "mypass\nlog: bad: true\n" 在没转义时会破坏 YAML 结构
+        -- 转义后必须输出成合法 YAML 双引号字符串
+        local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us", false, "admin", "pass: word")
+        assert.is_truthy(yaml:match('password: "pass: word"'),
+            "含 ': ' 的密码必须用双引号包起来,防止被解析成 YAML mapping")
+    end)
+
+    it("quotes username with at-sign and dot (uncommon but valid)", function()
+        local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us", false, "user@example.com", "pw")
+        assert.is_truthy(yaml:match('username: "user@example%.com"'),
+            "含 @ 的用户名必须用双引号包")
+        -- "pw" 是纯字母,走 plain scalar 不加引号(回归现有 4 条用例)
+        assert.is_truthy(yaml:match("password: pw"),
+            "纯字母密码不应该加引号")
+    end)
+
+    it("quotes directory with space", function()
+        local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us/My Books", false, "admin", "pw")
+        assert.is_truthy(yaml:match('directory: "/mnt/us/My Books"'),
+            "含空格的目录必须用双引号包")
+    end)
+
+    it("quotes YAML keywords to prevent interpretation as boolean/null", function()
+        -- true/false/null/yes/no/on/off 都是 YAML 1.1 关键字,会被解析成 bool
+        for _, keyword in ipairs({"true", "false", "null", "yes", "no", "on", "off"}) do
+            local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us", false, keyword, keyword)
+            assert.is_truthy(yaml:match('username: "' .. keyword .. '"'),
+                "username=" .. keyword .. " 必须用双引号包,否则被解析成 YAML bool")
+            assert.is_truthy(yaml:match('password: "' .. keyword .. '"'),
+                "password=" .. keyword .. " 必须用双引号包")
+        end
+    end)
+
+    it("quotes numeric-looking strings to prevent interpretation as number", function()
+        -- 如果 username 配成 "1234",没转义会被 webdav 当整数解析
+        local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us", false, "12345", "67890")
+        assert.is_truthy(yaml:match('username: "12345"'),
+            "数字用户名必须用双引号包")
+        assert.is_truthy(yaml:match('password: "67890"'),
+            "数字密码必须用双引号包")
+    end)
+
+    it("keeps plain strings unchanged (no spurious quoting)", function()
+        -- 回归:现有 4 条用例都要求 plain 输出,这条确保优化不会破坏兼容性
+        local yaml = webdav_config.writeConfigYAML("3568", "/tmp/fake-mnt-us", false, "admin", "webdav12345")
+        assert.is_truthy(yaml:match("\n  %- username: admin\n"),
+            "普通 username 不应该被引号包")
+        assert.is_truthy(yaml:match("\n    password: webdav12345\n"),
+            "普通 password 不应该被引号包")
+        assert.is_truthy(yaml:match("\ndirectory: /tmp/fake%-mnt%-us\n"),
+            "普通 directory 不应该被引号包")
+    end)
+
+    it("escapes embedded double quotes and backslashes", function()
+        -- 转义规则: \ -> \\, " -> \"
+        local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us", false, 'a"b', 'c\\d')
+        assert.is_truthy(yaml:match('username: "a\\"b"'),
+            '双引号必须转义为 \\"')
+        assert.is_truthy(yaml:match('password: "c\\\\d"'),
+            "反斜杠必须转义为 \\\\")
+    end)
+
+    it("falls back to placeholder when input contains control characters", function()
+        -- 含 \n 的输入不应该被拼进 YAML(会破结构)
+        local yaml = webdav_config.writeConfigYAML("3568", "/mnt/us", false,
+            "admin\nlog: bad: true", "pw\nmore: evil")
+        assert.is_truthy(yaml:match('username: "__invalid_username__"'),
+            "含控制字符的 username 应该被占位符替换,而不是拼进 YAML")
+        assert.is_truthy(yaml:match('password: "__invalid_password__"'),
+            "含控制字符的 password 应该被占位符替换")
+    end)
 end)

@@ -1,8 +1,11 @@
 # Kindle Paperwhite 2 设备端手测指南
 
 > **给执行手测的你**：
-> - PC 端 4 项验证已通过（单测 3/3、Lua 语法、二进制、布局），见 `tests/run_tests.py`。
+> - PC 端 5 项验证已通过（单元测试、模拟 KOReader 加载、Lua 语法/BOM、二进制架构、仓库结构），见 `tests/run_tests.py`。
 > - 这份指南是 PC 端无法 e2e 的部分，必须由你在 Kindle Paperwhite 2 上实操完成。
+> - ⚠️ 历史教训：上一版 PC 测试全部通过但设备上完全看不到插件——原因是(1) 依赖检查用了相对路径
+>   （KOReader 加载插件时 cwd 是 koreader 根目录，不是插件目录）；(2) main.lua 带 UTF-8 BOM。
+>   现在这两点都已在 PC 端测试中覆盖（模拟加载用真实路径语义 + BOM 检查），设备端请照本清单复核。
 > - 每步独立成段，复制粘贴即可。结果回填到下方表格。
 > - 任意一步失败 → 回到对应任务修代码，**不要跳步**。
 
@@ -38,7 +41,7 @@ ssh root@${env:WEBDAV_KINDLE_IP} "ls -la /mnt/us/koreader/plugins/webdav.koplugi
 # 其中 webdav 是 8.69 MB 的 ELF 32-bit LSB ARM 二进制
 
 # 1.3 验证二进制能在 Kindle 上执行
-ssh root@${env:WEBDAV_KINDLE_IP} "chmod +x /mnt/us/koreader/plugins/webdav.koplugin/webdav && /mnt/us/koreader/plugins/webdav.koplugin/webdav --version"
+ssh root@${env:WEBDAV_KINDLE_IP} "chmod +x /mnt/us/koreader/plugins/webdav.koplugin/webdav && /mnt/us/koreader/plugins/webdav.koplugin/webdav version"
 # 期望: 打印 webdav 版本号（说明二进制能跑、架构匹配）
 ```
 
@@ -50,24 +53,35 @@ ssh root@${env:WEBDAV_KINDLE_IP} "chmod +x /mnt/us/koreader/plugins/webdav.koplu
 
 ---
 
-## 2. 重启 KOReader
+## 2. 重启 KOReader 并确认加载
 
 Kindle 电源键 → 选 "Restart KOReader"（或完全退出再打开）。
+
+重启后先看 crash.log 有没有本插件的痕迹（主菜单 → 工具 → 崩溃日志，或 SSH 里 `tail -50 /mnt/us/koreader/crash.log`）：
+
+- `[Network] webdav binary not found at ...` → 二进制缺失/路径不对，回去检查部署
+- `Error when loading ... webdav.koplugin/main.lua ...` → main.lua 被破坏（BOM/语法），重新拷贝
+- `Plugin loaded webdav`（debug 模式才有）→ 加载成功
 
 ---
 
 ## 3. 验证主菜单可见
 
-进 KOReader → **主菜单** → **网络**（Network 分类）→ 应该看到 **WebDAV server** 项（左侧空格，未运行）。
+进 KOReader → **设置**（齿轮）→ **网络**（Network 分组）→ 应该看到 **WebDAV server** 项（左侧空格，未运行）。
+
+> 说明：上一版插件没有 `sorting_hint = "network"`，菜单项会以孤儿项出现在主菜单最前面并带 "…" 前缀；
+> 现在已归入"设置 → 网络"分组，与设计文档一致。
 
 | 验证项 | 通过 | 备注 |
 |---|---|---|
 | 3.1 在"网络"分类下 | ☐ | |
 | 3.2 左侧空格（未勾选）| ☐ | |
 | 3.3 父项文字是 "WebDAV server"（或翻译后对应中文）| ☐ | |
-| 3.4 点进子菜单能看到 7 个子项 | ☐ | |
+| 3.4 点进子菜单能看到 8 个子项（含 Force close on stop）| ☐ | |
 
-如果完全看不到 WebDAV server：回去检查 `webdav.koplugin/webdav` 二进制是否存在（KOReader 启动时 `util.pathExists` 检查失败会 `return { disabled = true }`）。
+如果完全看不到 WebDAV server：先查 crash.log（见第 2 步）——
+没有 `webdav binary not found` 日志且没有 `Error when loading` 时，还要确认
+"工具 → 插件管理 → User plugins" 里有没有 "WebDAV" 条目被手动禁用（`plugins_disabled`）。
 
 ---
 
@@ -78,13 +92,15 @@ Kindle 电源键 → 选 "Restart KOReader"（或完全退出再打开）。
 手动步骤：
 1. SSH 进 Kindle，`mv /mnt/us/koreader/plugins/webdav.koplugin/webdav /tmp/webdav_backup`
 2. 重启 KOReader
-3. 主菜单 → 网络 → 应**完全看不到** WebDAV server 项
+3. 设置 → 网络 → 应**完全看不到** WebDAV server 项；crash.log 里应有
+   `[Network] webdav binary not found at ...` 警告（插件被静默禁用，这是唯一的排查线索）
 4. SSH 把文件放回去：`mv /tmp/webdav_backup /mnt/us/koreader/plugins/webdav.koplugin/webdav`
 5. 重启 KOReader → 重新看到
 
 | 验证项 | 通过 | 备注 |
 |---|---|---|
 | 4.1 缺失二进制时菜单隐藏 | ☐ | |
+| 4.2 crash.log 出现 `webdav binary not found` | ☐ | 日志内容: `_______` |
 
 ---
 
@@ -232,7 +248,7 @@ PC 端访问 → 应连不上
 
 ## 14. 验证长按 toggle
 
-主菜单 → 网络 → **长按** WebDAV server 父项 → 应直接 toggle（不进子菜单）
+设置 → 网络 → **长按** WebDAV server 父项 → 应直接 toggle（不进子菜单）
 弹窗提示与正常点击一样
 
 | 验证项 | 通过 | 备注 |
