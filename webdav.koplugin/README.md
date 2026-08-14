@@ -153,6 +153,7 @@ Kindle 装 KOReader 之后，插上 USB 线（或者 SSH / Wi-Fi 传），把 `w
 | 现象 | 原因和解决办法 |
 |---|---|
 | 主菜单/插件列表完全看不到 WebDAV | 看 crash.log（见上表）：二进制缺失（重新拷贝）或 main.lua 被 BOM 破坏（重新拷贝） |
+| 点开关没反应 / 弹 `malformed pattern` 错误 | 旧版已知问题：控制字符检查用了含 NUL 字节的模式串，设备 LuaJIT 报 "malformed pattern (missing ']')"（PC 的 Lua 5.4 不报所以测不出）。已改为字节循环实现，请确认用的是最新版 main.lua |
 | 启用后立刻提示"启动失败" | 看崩溃日志；常见原因：端口被占用（换个端口）、配置目录没写权限、二进制损坏。启动失败详情写在 `/tmp/webdav_koreader.log` |
 | 电脑浏览器打不开 / 连不上 | 检查 Kindle 是不是连着 Wi-Fi；检查防火墙（Kindle 设备需要 iptables 放行）；电脑和 Kindle 必须在**同一个局域网**（不能跨网段）|
 | 登录提示用户名密码错误 | 在 KOReader WebDAV server 子菜单里核对 Username / Password 大小写、空格 |

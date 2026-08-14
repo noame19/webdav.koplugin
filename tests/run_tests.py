@@ -75,9 +75,57 @@ def run_unit_tests(lua: str) -> bool:
     return ok
 
 
+def find_luajit() -> str | None:
+    """探测 LuaJIT(与 KOReader 设备同款 5.1 语义)."""
+    if shutil.which("luajit"):
+        return shutil.which("luajit")
+    candidates = [
+        Path("D:/miniconda/Library/bin/luajit.exe"),
+        Path("C:/ProgramData/miniconda3/Library/bin/luajit.exe"),
+        Path(os.path.expanduser("~/miniconda3/Library/bin/luajit.exe")),
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return None
+
+
+def run_luajit_checks(lj: str) -> bool:
+    """LuaJIT 兼容性检查: 设备上跑的是 LuaJIT(5.1 语义), 而 PC 的 Lua 5.4 对
+    很多问题宽容(例如模式串内嵌 NUL 字节, LuaJIT 报 malformed pattern 而 5.4 不报)。
+    历史教训: has_control_char 的 "[\x00-\x1f\x7f]" 模式在 PC 全绿、
+    设备上 toggle 必炸, 就是这个盲区。"""
+    print("\n[3/6] LuaJIT 兼容性检查 (与设备同款语义):")
+    ok = True
+    # mock: 加载 + init + 交互路径
+    r = subprocess.run(
+        [lj, str(TESTS_DIR / "mock_koreader_load.lua")],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, encoding="utf-8",
+    )
+    if r.returncode == 0:
+        print("  OK    LuaJIT 模拟加载 + 交互演练")
+    else:
+        print(f"  FAIL  LuaJIT mock 失败 (exit {r.returncode})")
+        for line in r.stdout.rstrip().splitlines()[-5:]:
+            print(f"        {line}")
+        ok = False
+    # 全部 spec
+    for spec in sorted(TESTS_DIR.glob("*_spec.lua")):
+        r = subprocess.run(
+            [lj, str(TESTS_DIR / "busted.lua"), str(spec)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, encoding="utf-8",
+        )
+        if r.returncode == 0:
+            print(f"  OK    LuaJIT {spec.name}")
+        else:
+            print(f"  FAIL  LuaJIT {spec.name} (exit {r.returncode})")
+            ok = False
+    return ok
+
+
 def run_mock_load(lua: str) -> bool:
     """用 mock_koreader_load.lua 以真实路径语义加载插件, 复现 KOReader 的 dofile 流程."""
-    print("\n[2/5] 模拟 KOReader 加载 (mock_koreader_load.lua):")
+    print("\n[2/6] 模拟 KOReader 加载 (mock_koreader_load.lua):")
     result = subprocess.run(
         [lua, str(TESTS_DIR / "mock_koreader_load.lua")],
         cwd=str(REPO_ROOT),
@@ -93,7 +141,7 @@ def run_mock_load(lua: str) -> bool:
 
 
 def check_lua_syntax(luac: str) -> bool:
-    print("\n[3/5] Lua 语法 + BOM 检查:")
+    print("\n[4/6] Lua 语法 + BOM 检查:")
     lua_files = sorted(PLUGIN_DIR.glob("*.lua")) + sorted(TESTS_DIR.glob("*.lua"))
     ok = True
     for f in lua_files:
@@ -118,7 +166,7 @@ def check_lua_syntax(luac: str) -> bool:
 
 
 def check_binary() -> bool:
-    print("\n[4/5] webdav 二进制检查:")
+    print("\n[5/6] webdav 二进制检查:")
     bin_path = PLUGIN_DIR / "webdav"
     if not bin_path.exists():
         print(f"  FAIL  {bin_path} 不存在")
@@ -147,7 +195,7 @@ def check_binary() -> bool:
 
 
 def check_layout() -> bool:
-    print("\n[5/5] 仓库结构检查:")
+    print("\n[6/6] 仓库结构检查:")
     expected = [
         PLUGIN_DIR / "_meta.lua",
         PLUGIN_DIR / "main.lua",
@@ -191,10 +239,13 @@ def main() -> int:
     results = {
         "单元测试": run_unit_tests(lua),
         "模拟加载": run_mock_load(lua),
+        "LuaJIT 兼容": run_luajit_checks(lj) if (lj := find_luajit()) else True,
         "Lua 语法/BOM": check_lua_syntax(luac),
         "webdav 二进制": check_binary(),
         "仓库结构": check_layout(),
     }
+    if not lj:
+        print("(未找到 LuaJIT, 跳过 LuaJIT 兼容性检查)")
 
     print()
     for name, ok in results.items():

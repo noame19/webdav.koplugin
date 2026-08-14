@@ -79,13 +79,28 @@ local path = DataStorage:getFullDataDir()
 -- YAML 配置生成(内联, 无外部文件依赖)
 local webdav_config = {}
 
+-- 控制字符检查(0-31 和 127)。
+-- 注意: 不能用模式匹配 "[\x00-\x1f\x7f]" —— \x00 转义后模式串含 NUL 字节,
+-- 而 Lua 5.1/LuaJIT 的模式禁止内嵌 NUL("A pattern cannot contain embedded
+-- zeros. Use %z instead."), 会报 "malformed pattern (missing ']')"。
+-- PC 的 Lua 5.4 对此宽容, 所以本地测试测不出来, 设备上 toggle 才暴露。
+-- 定义在 webdav_config 之后、yaml_safe_string 之前, 让 writeConfigYAML_spec
+-- 的文本提取(从 "local webdav_config" 开始)能包含它。
+local function has_control_char(s)
+    for i = 1, #s do
+        local b = s:byte(i)
+        if b < 32 or b == 127 then return true end
+    end
+    return false
+end
+
 -- 把字符串转成 YAML 安全 scalar:
 --   - 含控制字符(nil) → 调用方回退到默认值
 --   - 只含安全字符且不是数字/关键字 → 直接返回(plain scalar)
 --   - 否则用双引号包, 转义 \\ 和 "
 local function yaml_safe_string(s)
     if s == nil or s == "" then return '""' end
-    if s:find("[\x00-\x1f\x7f]") then return nil end
+    if has_control_char(s) then return nil end
     local lower = s:lower()
     local looks_like_number = s:match("^[%-%+%d.eE]+$") ~= nil
     local is_yaml_keyword = lower == "true" or lower == "false" or lower == "null"

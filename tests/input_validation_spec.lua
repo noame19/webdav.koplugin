@@ -16,12 +16,19 @@
 -- yaml_safe_string 已经在 writeConfigYAML_spec.lua 里通过 writeConfigYAML 间接覆盖。
 
 -- 复刻 main.lua 头部模块级 helper
+-- 注意: has_control_char 必须是字节循环实现 —— 模式 "[\x00-\x1f\x7f]" 含
+-- NUL 字节, Lua 5.1/LuaJIT 的模式禁止内嵌 NUL(会报 malformed pattern),
+-- 只有 PC 的 Lua 5.4 宽容。这也是设备上 toggle 无反应的根因之一。
 local function trim(s)
     return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
 local function has_control_char(s)
-    return s:find("[\x00-\x1f\x7f]") ~= nil
+    for i = 1, #s do
+        local b = s:byte(i)
+        if b < 32 or b == 127 then return true end
+    end
+    return false
 end
 
 -- 复刻 show_port_dialog Save callback 的端口校验逻辑
