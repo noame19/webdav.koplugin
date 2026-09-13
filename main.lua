@@ -35,6 +35,14 @@ local util = require("util")
 local _ = require("gettext")
 local T = ffiutil.template
 
+-- KOReader 进程内"本次会话是否已自动启动过 webdav"的标记。
+-- is_doc_only=false 的插件每次开书/进 FileManager 都会被 KOReader 重新实例化
+-- (frontend/apps/reader/readerui.lua:464, frontend/apps/filemanager/filemanager.lua:419),
+-- 没有这个标记, "开机自启"会被每次开书重复触发, 违背用户意图。
+-- 模块级变量随 KOReader 进程生命周期稳定, 进程退出时销毁, 下次启动自然重置,
+-- 这正是"开机自启 = KOReader 启动那一刻的一次性动作"语义。
+local webdav_autostart_session_done = false
+
 -- 常量
 local PID_PATH = "/tmp/webdav_koreader.pid"
 local LOG_PATH = "/tmp/webdav_koreader.log"
@@ -216,11 +224,18 @@ function WebDAV:init()
     -- 调试日志开关: 开启时 webdav 日志写 /tmp/webdav_koreader.log, 关闭时丢弃
     self.webdav_debug_log = G_reader_settings:isTrue("webdav_debug_log")
 
-    if self.autostart then
+    -- 自启动条件: 用户勾选了自启 && 本会话还没自启过 && webdav 进程当前未运行。
+    -- 任一不满足 → init() 完全跳过, 不影响 webdav 当前开/关状态, 这保证:
+    --   * KOReader 启动时按自启开关自启一次 (webdav_autostart_session_done 翻转)
+    --   * 后续开书 / 进 FileManager 实例化新 widget 时跳过 (flag 已是 true)
+    --   * 用户手动 toggle off 后保持关闭 (isRunning() 持续 false 但 flag 仍是 true)
+    if self.autostart and not webdav_autostart_session_done and not self:isRunning() then
         -- pcall 包住: 即使 start() 出错, 也要让菜单能注册
         -- (避免因 iptables / 权限 / 二进制异常等导致用户看不到整个插件)
+        webdav_autostart_session_done = true  -- 先置位, 启动失败时回滚让下次 init 重试
         local ok, err = pcall(function() self:start() end)
         if not ok then
+            webdav_autostart_session_done = false
             logger.warn("[Network] WebDAV autostart failed:", err)
         end
     end
