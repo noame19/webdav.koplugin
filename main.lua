@@ -39,7 +39,11 @@ local T = ffiutil.template
 -- is_doc_only=false 的插件每次开书/进 FileManager 都会被 KOReader 重新实例化
 -- (frontend/apps/reader/readerui.lua:464, frontend/apps/filemanager/filemanager.lua:419),
 -- 没有这个标记, "开机自启"会被每次开书重复触发, 违背用户意图。
--- 模块级变量随 KOReader 进程生命周期稳定, 进程退出时销毁, 下次启动自然重置,
+-- 真实持久化在 AUTOSTART_MARKER_PATH 文件里(写入当前 KOReader PID);
+-- module-level local 是同进程内 dofile 重跑时的快速路径, 两者结合保证:
+--   * KOReader 启动那一刻自启一次(文件写入当前 PID)
+--   * 后续 init() 检测到 PID 一致 → 直接跳过
+--   * KOReader 重启 → PID 不同 → 标记视为新会话, 下次启动重新触发
 -- 这正是"开机自启 = KOReader 启动那一刻的一次性动作"语义。
 local webdav_autostart_session_done = false
 
@@ -48,6 +52,51 @@ local PID_PATH = "/tmp/webdav_koreader.pid"
 local LOG_PATH = "/tmp/webdav_koreader.log"
 local SETTINGS_DIR_NAME = "webdav"
 local CONFIG_FILE_NAME = "config.yml"
+-- 自启动一次性标记文件: 写入当前 KOReader 进程 PID, init() 检查 PID 是否一致
+-- 一致 → 跳过 autostart; 不一致/不存在 → 视为新会话, 触发 autostart 后写入。
+-- 用文件而非 module-level local 的原因:
+--   PluginLoader 在某些 KOReader 版本/分支下会在 FileManager/ReaderUI 切换时
+--   重新 dofile() main.lua, 重置所有 module-level locals; 文件标记不受 dofile
+--   影响, 是"本次 KOReader 进程内只触发一次"语义的可靠实现。
+--   进程退出后 PID 文件残留, 但下次 KOReader 启动 PID 不同 → 视为新会话。
+local AUTOSTART_MARKER_PATH = "/tmp/webdav_koreader.autostart"
+
+-- 当前 KOReader 进程 PID: 用作 autostart marker 的会话标识
+local function current_koreader_pid()
+    -- getpid 在 KOReader 的 LuaJIT 上可用 (ffi.C.getpid)
+    local ok, ffi = pcall(require, "ffi")
+    if ok and ffi and ffi.C then
+        return tonumber(ffi.C.getpid()) or 0
+    end
+    return 0
+end
+
+-- 检查自启动标记: 当前 PID 与文件记录的 PID 一致 → 已自启过
+local function has_autostart_marker()
+    local f = io.open(AUTOSTART_MARKER_PATH, "r")
+    if not f then return false end
+    local content = f:read("*l")
+    f:close()
+    if not content then return false end
+    return tonumber(content) == current_koreader_pid()
+end
+
+-- 写入自启动标记: 启动成功后调用, 防止后续 init() 重复触发
+local function write_autostart_marker()
+    local pid = current_koreader_pid()
+    local f = io.open(AUTOSTART_MARKER_PATH, "w")
+    if f then
+        f:write(tostring(pid))
+        f:close()
+    end
+    -- 写失败也无所谓: module-level local 已置 true, 同进程内仍可防重复
+end
+
+-- 清理自启动标记: 用于自启动失败时让下次 init() 重试
+local function clear_autostart_marker()
+    pcall(os.remove, AUTOSTART_MARKER_PATH)
+    webdav_autostart_session_done = false
+end
 
 -- 路径拼接: DataStorage:getFullDataDir() 返回的是**不带尾斜杠**的目录
 -- (如 /mnt/us/koreader, 见 datastorage.lua 文档示例), 必须显式补 "/"。
@@ -226,17 +275,30 @@ function WebDAV:init()
 
     -- 自启动条件: 用户勾选了自启 && 本会话还没自启过 && webdav 进程当前未运行。
     -- 任一不满足 → init() 完全跳过, 不影响 webdav 当前开/关状态, 这保证:
-    --   * KOReader 启动时按自启开关自启一次 (webdav_autostart_session_done 翻转)
-    --   * 后续开书 / 进 FileManager 实例化新 widget 时跳过 (flag 已是 true)
+    --   * KOReader 启动时按自启开关自启一次 (webdav_autostart_session_done 翻转 + 写 marker 文件)
+    --   * 后续开书 / 进 FileManager 实例化新 widget 时跳过 (flag 已是 true, marker 文件匹配 PID)
     --   * 用户手动 toggle off 后保持关闭 (isRunning() 持续 false 但 flag 仍是 true)
-    if self.autostart and not webdav_autostart_session_done and not self:isRunning() then
+    --   * KOReader 进程重启 → marker 文件里的 PID 不再匹配 → 视为新会话, 下次 init 重新触发
+    --
+    -- 双层检查: webdav_autostart_session_done 是 module-level local, 处理正常的
+    -- PluginLoader 缓存场景(dofile 只跑一次); has_autostart_marker() 处理某些
+    -- KOReader 版本/分支下 dofile 被多次调用的场景(模块级变量被重置但文件保留)。
+    if self.autostart
+       and not webdav_autostart_session_done
+       and not has_autostart_marker()
+       and not self:isRunning() then
         -- pcall 包住: 即使 start() 出错, 也要让菜单能注册
         -- (避免因 iptables / 权限 / 二进制异常等导致用户看不到整个插件)
-        webdav_autostart_session_done = true  -- 先置位, 启动失败时回滚让下次 init 重试
+        webdav_autostart_session_done = true  -- 同进程内 dofile 重跑的快速路径
         local ok, err = pcall(function() self:start() end)
         if not ok then
-            webdav_autostart_session_done = false
+            -- 自启动抛异常(罕见), 回滚标记让下次 init() 重试
+            clear_autostart_marker()
             logger.warn("[Network] WebDAV autostart failed:", err)
+        else
+            -- start() 正常返回(包括已运行/启动失败弹窗返回), 写入 marker 文件固化"已自启"
+            -- 这样即使后续 start() 内部某个 os.execute 抛出未捕获异常, marker 已经在盘上
+            write_autostart_marker()
         end
     end
 
@@ -442,6 +504,9 @@ function WebDAV:deletePluginSettings()
     if util.pathExists(settings_dir) then
         os.execute(string.format("rm -rf %q", settings_dir))
     end
+    -- 清理 autostart marker: 用户删插件后, 下次重新部署时不应该被旧 marker 干扰
+    pcall(os.remove, AUTOSTART_MARKER_PATH)
+    webdav_autostart_session_done = false
 end
 
 -- 主菜单 toggle 行为
